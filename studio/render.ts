@@ -38,6 +38,10 @@ function animationFrame(animation: LayerAnimation | undefined, time: number | un
   return { alpha: progress, x: 0, y: 0, scale: 1 };
 }
 
+function animationFinished(animation: LayerAnimation | undefined, time: number) {
+  return !animation?.enabled || time >= animation.delay + animation.duration;
+}
+
 function drawTransformed(ctx: CanvasRenderingContext2D, source: CanvasImageSource, frame: ReturnType<typeof animationFrame>, width: number, height: number, operation?: GlobalCompositeOperation) {
   if (frame.alpha <= 0) return;
   ctx.save();
@@ -109,6 +113,9 @@ export function renderPoster({
       const animation = timeline.sceneAnimations[layer.id] ?? STATIC_ANIMATION;
       drawTransformed(ctx, maskedImage(image, layer, width, height), animationFrame(animation, time, width, height), width, height);
     }
+    const sceneSettled = animationFinished(timeline.baseAnimation, time)
+      && semanticLayers.every((layer) => animationFinished(timeline.sceneAnimations[layer.id] ?? STATIC_ANIMATION, time));
+    if (sceneSettled) ctx.drawImage(image, 0, 0, width, height);
   } else {
     ctx.drawImage(image, 0, 0, width, height);
   }

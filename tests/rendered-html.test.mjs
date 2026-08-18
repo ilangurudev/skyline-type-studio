@@ -48,6 +48,8 @@ test("animates the base photo, depth planes, and text on one timeline", async ()
   assert.match(renderer, /timeline\.backgroundColor/);
   assert.match(renderer, /maskedImage\(image, layer/);
   assert.match(renderer, /animationFrame\(textLayer\.animation/);
+  assert.match(renderer, /animationFinished\(timeline\.baseAnimation/);
+  assert.match(renderer, /if \(sceneSettled\) ctx\.drawImage\(image/);
 });
 
 test("wires semantic masks to depth-aware layer splitting", async () => {
