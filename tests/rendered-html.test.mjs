@@ -21,6 +21,8 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /Choose a photograph/i);
   assert.match(html, /Poster text/i);
   assert.match(html, /Sky mask/i);
+  assert.match(html, /semantic model traces detailed silhouettes/i);
   assert.match(html, /Download full-resolution PNG/i);
+  assert.doesNotMatch(html, /Horizon guide/i);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/i);
 });
