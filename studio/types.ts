@@ -106,20 +106,23 @@ export function createTextLayer(id: string, index: number, frontLayerIds: string
     extrusionDepth: 10,
     extrusionAngle: 45,
     frontLayerIds,
-    animation: { enabled: true, effect: "rise", delay: 500 + (index - 1) * 250, duration: 900 },
+    animation: { enabled: true, effect: "rise", delay: 3600 + (index - 1) * 200, duration: 1200 },
   };
 }
 
-export function createLayerAnimation(delay = 0): LayerAnimation {
-  return { enabled: true, effect: "fade", delay, duration: 900 };
+export function createLayerAnimation(delay = 0, duration = 1200): LayerAnimation {
+  return { enabled: true, effect: "fade", delay, duration };
 }
 
 export function createTimelineSettings(layerIds: string[] = []): TimelineSettings {
   return {
     duration: 5000,
     backgroundColor: "#000000",
-    baseAnimation: createLayerAnimation(0),
-    sceneAnimations: Object.fromEntries(layerIds.map((id, index) => [id, createLayerAnimation(250 + index * 250)])),
+    baseAnimation: createLayerAnimation(250, 1200),
+    sceneAnimations: Object.fromEntries([...layerIds].reverse().map((id, index) => {
+      const gap = layerIds.length > 1 ? Math.min(650, 1900 / (layerIds.length - 1)) : 0;
+      return [id, createLayerAnimation(1100 + index * gap, 1200)];
+    })),
   };
 }
 

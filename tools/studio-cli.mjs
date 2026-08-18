@@ -91,6 +91,16 @@ async function saveRender(page, output, analysis, recipe, options) {
   return dimensions;
 }
 
+async function saveAnimation(page, output, analysis, recipe, options) {
+  await mkdir(dirname(output), { recursive: true });
+  const downloadPromise = page.waitForEvent("download");
+  const resultPromise = page.evaluate(([cached, currentRecipe, animationOptions]) => window.skylineAutomation.animate(cached, currentRecipe, animationOptions), [analysis, recipe, { ...options, filename: basename(output) }]);
+  const download = await downloadPromise;
+  const result = await resultPromise;
+  await download.saveAs(output);
+  return result;
+}
+
 async function init(options) {
   const input = resolve(required(options, "input"));
   const work = resolve(required(options, "work"));
@@ -117,8 +127,10 @@ async function preview(options) {
   const state = await readWork(required(options, "work"));
   const output = resolve(options.output || join(state.work, options.overlay ? "preview-overlay.webp" : "preview.webp"));
   const id = renderId(state.source, state.analysis, state.recipe);
-  const dimensions = await withRunner(state.source.path, (page) => saveRender(page, output, state.analysis, state.recipe, { format: "webp", maxDimension: 768, overlay: Boolean(options.overlay) }));
-  const report = { ok: true, command: "preview", renderId: id, output, format: "webp", quality: 0.82, ...dimensions, sourceWidth: state.source.width, sourceHeight: state.source.height, overlay: Boolean(options.overlay) };
+  const time = options.time === undefined ? undefined : Number(options.time) * 1000;
+  if (time !== undefined && (!Number.isFinite(time) || time < 0 || time > 60000)) throw new Error("--time must be a number of seconds from 0 to 60.");
+  const dimensions = await withRunner(state.source.path, (page) => saveRender(page, output, state.analysis, state.recipe, { format: "webp", maxDimension: 768, overlay: Boolean(options.overlay), time }));
+  const report = { ok: true, command: "preview", renderId: id, output, format: "webp", quality: 0.82, ...dimensions, sourceWidth: state.source.width, sourceHeight: state.source.height, overlay: Boolean(options.overlay), time: time === undefined ? null : time };
   await writeFile(join(state.work, "preview-report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(report)}\n`);
 }
@@ -139,13 +151,29 @@ async function exportProject(options) {
   process.stdout.write(`${JSON.stringify({ ok: true, command: "export", renderId: currentId, output, project: projectPath, ...dimensions })}\n`);
 }
 
+async function animate(options) {
+  const state = await readWork(required(options, "work"));
+  const approved = required(options, "approved");
+  const currentId = renderId(state.source, state.analysis, state.recipe);
+  if (approved !== currentId) throw new Error(`Approval is stale. Preview the current recipe and approve render ${currentId}.`);
+  if (!state.recipe.timeline) throw new Error("The recipe does not contain an animation timeline.");
+  const output = resolve(required(options, "output"));
+  const fps = options.fps === undefined ? 30 : Number(options.fps);
+  if (!Number.isInteger(fps) || fps < 12 || fps > 60) throw new Error("--fps must be an integer from 12 to 60.");
+  process.stderr.write("Rendering the approved animation locally at source resolution…\n");
+  const result = await withRunner(state.source.path, (page) => saveAnimation(page, output, state.analysis, state.recipe, { fps }));
+  if (result.width !== state.source.width || result.height !== state.source.height) throw new Error("Animated export dimensions do not match the source photograph.");
+  process.stdout.write(`${JSON.stringify({ ok: true, command: "animate", renderId: currentId, output, ...result })}\n`);
+}
+
 async function main() {
   const { command, options } = parseArgs(process.argv.slice(2));
   if (command === "init") return init(options);
   if (command === "inspect") return inspect(options);
   if (command === "preview") return preview(options);
   if (command === "export") return exportProject(options);
-  throw new Error("Usage: studio <init|inspect|preview|export> [options]");
+  if (command === "animate") return animate(options);
+  throw new Error("Usage: studio <init|inspect|preview|export|animate> [options]");
 }
 
 main().catch((error) => fail(error instanceof Error ? error.message : String(error)));

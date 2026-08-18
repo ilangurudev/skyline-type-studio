@@ -74,7 +74,7 @@ function createTextLayer(id: string, index: number, frontLayerIds: string[] = []
     extrusionDepth: 10,
     extrusionAngle: 45,
     frontLayerIds,
-    animation: { enabled: true, effect: "rise", delay: 500 + (index - 1) * 250, duration: 900 },
+    animation: { enabled: true, effect: "rise", delay: 3600 + (index - 1) * 200, duration: 1200 },
   };
 }
 
@@ -477,10 +477,13 @@ export default function Home() {
       if (!layers.length) throw new Error("No distinct depth layers were detected in this photograph.");
       setSemanticLayers(layers);
       setTextLayers((current) => current.map((textLayer) => ({ ...textLayer, frontLayerIds: layers.map((layer) => layer.id) })));
-      setTimeline((current) => ({
-        ...current,
-        sceneAnimations: Object.fromEntries(layers.map((layer, index) => [layer.id, current.sceneAnimations[layer.id] ?? createLayerAnimation(300 + index * 300)])),
-      }));
+      setTimeline((current) => {
+        const sequenced = createTimelineSettings(layers.map((layer) => layer.id)).sceneAnimations;
+        return {
+          ...current,
+          sceneAnimations: Object.fromEntries(layers.map((layer) => [layer.id, current.sceneAnimations[layer.id] ?? sequenced[layer.id]])),
+        };
+      });
       setAnalysisQuality(depthEnhanced ? "depth" : "semantic");
       setMaskStatus("ready");
     } catch (error) {
@@ -642,7 +645,7 @@ export default function Home() {
         drawPoster(exportCanvas, false, undefined, time);
         setPlayhead(time);
         if (time < timeline.duration) requestAnimationFrame(renderFrame);
-        else { recorder.stop(); resolve(); }
+        else setTimeout(() => { recorder.stop(); resolve(); }, 50);
       };
       requestAnimationFrame(renderFrame);
     });
@@ -740,7 +743,7 @@ export default function Home() {
           </div>
           <div className="timeline-player">
             <button type="button" className="play-button" onClick={isPlaying ? stopPlayback : play} disabled={!imageName}>{isPlaying ? "Pause" : playhead >= timeline.duration ? "Replay" : "Play"}</button>
-            <input aria-label="Animation playhead" type="range" min={0} max={timeline.duration} step={16} value={playhead} onChange={(event) => { stopPlayback(); setPlayhead(Number(event.target.value)); }} />
+            <input aria-label="Animation playhead" type="range" min={0} max={timeline.duration} step={10} value={playhead} onChange={(event) => { stopPlayback(); setPlayhead(Number(event.target.value)); }} />
             <output>{(playhead / 1000).toFixed(1)}s</output>
           </div>
           <div className="animation-layer-list">

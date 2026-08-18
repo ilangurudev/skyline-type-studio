@@ -79,8 +79,12 @@ test("ships an agent-native preview and approved-export contract", async () => {
   assert.match(cli, /command === "inspect"/);
   assert.match(cli, /command === "preview"/);
   assert.match(cli, /command === "export"/);
+  assert.match(cli, /command === "animate"/);
   assert.match(cli, /maxDimension: 768/);
+  assert.match(cli, /options\.time.*Number\(options\.time\) \* 1000/);
+  assert.match(cli, /--time must be a number of seconds/);
   assert.match(cli, /Approval is stale/);
+  assert.match(cli, /Animated export dimensions do not match/);
   assert.equal(schema.properties.schemaVersion.const, 1);
   assert.equal(schema.properties.textLayers.minItems, 1);
   assert.deepEqual(schema.$defs.animation.properties.effect.enum, ["fade", "rise", "drift", "zoom"]);

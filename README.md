@@ -48,7 +48,12 @@ adds the detected depth colors for mask review.
 ```bash
 npm run studio -- preview --work work/my-poster
 npm run studio -- preview --work work/my-poster --overlay
+npm run studio -- preview --work work/my-poster --time 0 --output work/my-poster/opening.webp
+npm run studio -- preview --work work/my-poster --time 2.5 --output work/my-poster/middle.webp
 ```
+
+`--time` renders an exact animation frame in seconds, making opening, midpoint,
+and completed-state review deterministic before an animated export.
 
 The preview response includes a `renderId`. Once that exact preview is approved,
 use it to unlock a source-resolution PNG and a reusable project file:
@@ -65,6 +70,15 @@ The `.skyline.cfg` archive contains the recipe and cached masks, but not the
 source photograph. Import it in the visual editor and choose the matching photo
 to restore the composition without rerunning analysis. CLI results are JSON on
 stdout; progress and diagnostics are written to stderr.
+
+The same approved preview can unlock a source-resolution animated WebM:
+
+```bash
+npm run studio -- animate \
+  --work work/my-poster \
+  --approved <renderId> \
+  --output outputs/poster.webm
+```
 
 ## Build and verify
 
