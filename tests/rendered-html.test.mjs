@@ -28,7 +28,8 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /Semantic objects are split into near, middle, and far planes/i);
   assert.match(html, /Show colored layer overlay/i);
   assert.match(html, /Models download once/i);
-  assert.match(html, /Download full-resolution PNG/i);
+  assert.match(html, /Download PNG \+ project/i);
+  assert.match(html, /Import \.skyline\.cfg project/i);
   assert.doesNotMatch(html, /Horizon guide/i);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/i);
 });
@@ -43,11 +44,34 @@ test("wires semantic masks to depth-aware layer splitting", async () => {
 
 test("renders and depth-masks every text layer independently", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const renderer = await readFile(new URL("../studio/render.ts", import.meta.url), "utf8");
   assert.match(source, /type TextLayer =/);
-  assert.match(source, /for \(const textLayer of textLayers\)/);
-  assert.match(source, /mergeMasks\(semanticLayers, textLayer\.frontLayerIds\)/);
-  assert.match(source, /globalCompositeOperation = "destination-out"/);
+  assert.match(source, /renderPoster\(\{/);
+  assert.match(renderer, /for \(const textLayer of textLayers\)/);
+  assert.match(renderer, /mergeMasks\(semanticLayers, textLayer\.frontLayerIds\)/);
+  assert.match(renderer, /globalCompositeOperation = "destination-out"/);
   assert.match(source, /addTextLayer/);
-  assert.match(source, /extrusionLength/);
-  assert.match(source, /textLayer\.extrusionColor/);
+  assert.match(renderer, /extrusionLength/);
+  assert.match(renderer, /textLayer\.extrusionColor/);
+});
+
+test("ships an agent-native preview and approved-export contract", async () => {
+  const cli = await readFile(new URL("../tools/studio-cli.mjs", import.meta.url), "utf8");
+  const schema = JSON.parse(await readFile(new URL("../studio/recipe.schema.json", import.meta.url), "utf8"));
+  assert.match(cli, /command === "init"/);
+  assert.match(cli, /command === "inspect"/);
+  assert.match(cli, /command === "preview"/);
+  assert.match(cli, /command === "export"/);
+  assert.match(cli, /maxDimension: 768/);
+  assert.match(cli, /Approval is stale/);
+  assert.equal(schema.properties.schemaVersion.const, 1);
+  assert.equal(schema.properties.textLayers.minItems, 1);
+});
+
+test("project archives retain cached masks without embedding the photograph", async () => {
+  const project = await readFile(new URL("../studio/project.ts", import.meta.url), "utf8");
+  assert.match(project, /"project\.json"/);
+  assert.match(project, /serializeAnalysis/);
+  assert.match(project, /sha256File/);
+  assert.doesNotMatch(project, /sourceImage|imageBytes|originalPhoto/);
 });

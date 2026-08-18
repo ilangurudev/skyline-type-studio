@@ -19,6 +19,47 @@ npm run dev
 Open the local URL printed by the development server. The first segmentation
 can take a little longer because the browser downloads and caches the AI models.
 
+## Control it with code
+
+The local CLI runs the same browser analysis and canvas renderer without opening
+the editor UI. Install its managed browser once:
+
+```bash
+npm run studio:install-browser
+```
+
+Analyze a photograph once and create an editable work directory:
+
+```bash
+npm run studio -- init --input /path/to/photo.jpg --work work/my-poster
+npm run studio -- inspect --work work/my-poster
+```
+
+Edit `work/my-poster/recipe.json` with code, then request compact verification
+renders. Previews are 768 px on the long edge and WebP quality 0.82; `--overlay`
+adds the detected depth colors for mask review.
+
+```bash
+npm run studio -- preview --work work/my-poster
+npm run studio -- preview --work work/my-poster --overlay
+```
+
+The preview response includes a `renderId`. Once that exact preview is approved,
+use it to unlock a source-resolution PNG and a reusable project file:
+
+```bash
+npm run studio -- export \
+  --work work/my-poster \
+  --approved <renderId> \
+  --output outputs/poster.png \
+  --project outputs/poster.skyline.cfg
+```
+
+The `.skyline.cfg` archive contains the recipe and cached masks, but not the
+source photograph. Import it in the visual editor and choose the matching photo
+to restore the composition without rerunning analysis. CLI results are JSON on
+stdout; progress and diagnostics are written to stderr.
+
 ## Build and verify
 
 ```bash

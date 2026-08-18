@@ -1,6 +1,9 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
+import { createProjectArchive, deserializeAnalysis, readProjectArchive, serializeAnalysis, sha256File } from "@/studio/project";
+import { renderPoster } from "@/studio/render";
+import type { SkylineProjectV1, SourceFingerprint } from "@/studio/types";
 
 type TextAlign = "left" | "center" | "right";
 type TextLayer = {
@@ -340,38 +343,13 @@ function createDepthLayers(baseMasks: BaseSemanticMask[], depth: Float32Array | 
   };
 }
 
-function createMaskCanvas(mask: BinaryMask) {
-  const canvas = document.createElement("canvas");
-  canvas.width = mask.width;
-  canvas.height = mask.height;
-  const ctx = canvas.getContext("2d")!;
-  const pixels = ctx.createImageData(mask.width, mask.height);
-  for (let index = 0; index < mask.data.length; index += 1) {
-    const offset = index * 4;
-    pixels.data[offset] = pixels.data[offset + 1] = pixels.data[offset + 2] = 255;
-    pixels.data[offset + 3] = mask.data[index];
-  }
-  ctx.putImageData(pixels, 0, 0);
-  return canvas;
-}
-
-function mergeMasks(layers: SemanticLayer[], layerIds: string[]): BinaryMask | null {
-  const selected = layers.filter((layer) => layerIds.includes(layer.id));
-  if (!selected.length) return null;
-  const { width, height } = selected[0];
-  const data = new Uint8ClampedArray(width * height);
-  for (const layer of selected) {
-    for (let index = 0; index < data.length; index += 1) {
-      if (layer.data[index] > data[index]) data[index] = layer.data[index];
-    }
-  }
-  return { width, height, data };
-}
-
 export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
+  const projectInput = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const sourceFingerprintRef = useRef<SourceFingerprint | null>(null);
+  const pendingProjectRef = useRef<SkylineProjectV1 | null>(null);
   const analysisSequence = useRef(0);
   const nextTextLayerId = useRef(2);
   const [imageName, setImageName] = useState("");
@@ -417,92 +395,11 @@ export default function Home() {
     });
   };
 
-  const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false) => {
+  const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false, maxDimension?: number) => {
     const image = imageRef.current;
     if (!image) return;
-    const scale = Math.min(1, 7000 / Math.max(image.naturalWidth, image.naturalHeight));
-    const width = Math.round(image.naturalWidth * scale);
-    const height = Math.round(image.naturalHeight * scale);
-    target.width = width;
-    target.height = height;
-    const ctx = target.getContext("2d")!;
-    ctx.drawImage(image, 0, 0, width, height);
-
-    for (const textLayer of textLayers) {
-      const typeCanvas = document.createElement("canvas");
-      typeCanvas.width = width;
-      typeCanvas.height = height;
-      const typeCtx = typeCanvas.getContext("2d")!;
-      const sizePx = (textLayer.fontSize / 100) * height;
-      const lines = textLayer.text.split("\n");
-      const lineHeight = sizePx * (1 + textLayer.lineGap / 100);
-      const totalHeight = Math.max(sizePx, (lines.length - 1) * lineHeight + sizePx);
-      const startBaseline = (textLayer.yPosition / 100) * height - totalHeight / 2 + sizePx * 0.82;
-      const x = (textLayer.xPosition / 100) * width;
-      typeCtx.font = `900 ${sizePx}px ${textLayer.font}`;
-      typeCtx.textAlign = textLayer.alignment;
-      typeCtx.textBaseline = "alphabetic";
-      typeCtx.lineJoin = "round";
-      const angle = (textLayer.extrusionAngle * Math.PI) / 180;
-      const extrusionLength = textLayer.extrusion ? sizePx * (textLayer.extrusionDepth / 100) : 0;
-      const extrusionX = Math.cos(angle) * extrusionLength;
-      const extrusionY = Math.sin(angle) * extrusionLength;
-      lines.forEach((line, index) => {
-        const baseline = startBaseline + index * lineHeight;
-        if (textLayer.shadow) {
-          typeCtx.fillStyle = textLayer.shadowColor;
-          const offset = Math.max(3, sizePx * 0.045);
-          typeCtx.fillText(line, x + extrusionX + offset, baseline + extrusionY + offset);
-        }
-        if (textLayer.extrusion && extrusionLength > 0) {
-          typeCtx.fillStyle = textLayer.extrusionColor;
-          const steps = Math.max(1, Math.ceil(extrusionLength));
-          for (let step = steps; step >= 1; step -= 1) {
-            const progress = step / steps;
-            typeCtx.fillText(line, x + extrusionX * progress, baseline + extrusionY * progress);
-          }
-        }
-        typeCtx.fillStyle = textLayer.textColor;
-        typeCtx.fillText(line, x, baseline);
-      });
-
-      const frontMask = mergeMasks(semanticLayers, textLayer.frontLayerIds);
-      if (frontMask) {
-        typeCtx.globalCompositeOperation = "destination-out";
-        typeCtx.imageSmoothingEnabled = true;
-        typeCtx.drawImage(createMaskCanvas(frontMask), 0, 0, width, height);
-      }
-      ctx.drawImage(typeCanvas, 0, 0);
-    }
-
-    if (maskOverlay && (skyMask || semanticLayers.length)) {
-      const overlay = document.createElement("canvas");
-      const reference = skyMask ?? semanticLayers[0];
-      overlay.width = reference.width;
-      overlay.height = reference.height;
-      const overlayCtx = overlay.getContext("2d")!;
-      const pixels = overlayCtx.createImageData(reference.width, reference.height);
-      for (let index = 0; index < reference.width * reference.height; index += 1) {
-        const offset = index * 4;
-        if (skyMask?.data[index]) {
-          pixels.data[offset] = 73;
-          pixels.data[offset + 1] = 175;
-          pixels.data[offset + 2] = 255;
-          pixels.data[offset + 3] = 64;
-        }
-        for (const layer of semanticLayers) {
-          if (!layer.data[index]) continue;
-          pixels.data[offset] = layer.color[0];
-          pixels.data[offset + 1] = layer.color[1];
-          pixels.data[offset + 2] = layer.color[2];
-          pixels.data[offset + 3] = activeTextLayer?.frontLayerIds.includes(layer.id) ? 104 : 42;
-          break;
-        }
-      }
-      overlayCtx.putImageData(pixels, 0, 0);
-      ctx.drawImage(overlay, 0, 0, width, height);
-    }
-  }, [activeTextLayer, semanticLayers, skyMask, textLayers]);
+    return renderPoster({ target, image, textLayers, semanticLayers, skyMask, activeTextLayerId, maskOverlay, maxDimension });
+  }, [activeTextLayerId, semanticLayers, skyMask, textLayers]);
 
   const analyzeImage = useCallback(async (image: HTMLImageElement) => {
     const sequence = ++analysisSequence.current;
@@ -590,34 +487,97 @@ export default function Home() {
 
   useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask); }, [drawPoster, showMask]);
 
-  const loadFile = (file?: File) => {
+  const loadFile = async (file?: File) => {
     if (!file || !file.type.startsWith("image/")) return;
+    const pendingProject = pendingProjectRef.current;
+    setMaskError("");
+    let sha256: string;
+    try {
+      sha256 = await sha256File(file);
+    } catch {
+      setMaskError("The browser could not fingerprint this photograph.");
+      setMaskStatus("error");
+      return;
+    }
+    if (pendingProject && sha256 !== pendingProject.source.sha256) {
+      setMaskError(`This project expects ${pendingProject.source.name}. Choose the original matching photograph.`);
+      setMaskStatus("error");
+      return;
+    }
     const objectUrl = URL.createObjectURL(file);
     const image = new Image();
     image.onload = () => {
+      if (pendingProject && (image.naturalWidth !== pendingProject.source.width || image.naturalHeight !== pendingProject.source.height)) {
+        URL.revokeObjectURL(objectUrl);
+        setMaskError("The selected photograph dimensions do not match this project.");
+        setMaskStatus("error");
+        return;
+      }
       imageRef.current = image;
       setImageName(file.name);
       setDimensions(`${image.naturalWidth.toLocaleString()} × ${image.naturalHeight.toLocaleString()}`);
+      sourceFingerprintRef.current = { name: file.name, size: file.size, width: image.naturalWidth, height: image.naturalHeight, sha256 };
       URL.revokeObjectURL(objectUrl);
-      void analyzeImage(image);
+      if (pendingProject) {
+        const restored = deserializeAnalysis(pendingProject.analysis);
+        setSkyMask(restored.skyMask);
+        setSemanticLayers(restored.layers);
+        setAnalysisQuality(restored.quality);
+        setTextLayers(pendingProject.recipe.textLayers);
+        setActiveTextLayerId(pendingProject.recipe.activeTextLayerId);
+        nextTextLayerId.current = Math.max(2, pendingProject.recipe.textLayers.length + 1);
+        setMaskStatus("ready");
+        pendingProjectRef.current = null;
+      } else {
+        void analyzeImage(image);
+      }
     };
     image.onerror = () => { URL.revokeObjectURL(objectUrl); setMaskError("That image could not be opened."); setMaskStatus("error"); };
     image.src = objectUrl;
   };
-  const handleFile = (event: ChangeEvent<HTMLInputElement>) => loadFile(event.target.files?.[0]);
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => { event.preventDefault(); setIsDragging(false); loadFile(event.dataTransfer.files?.[0]); };
+  const handleFile = (event: ChangeEvent<HTMLInputElement>) => { void loadFile(event.target.files?.[0]); };
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => { event.preventDefault(); setIsDragging(false); void loadFile(event.dataTransfer.files?.[0]); };
+  const handleProject = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      pendingProjectRef.current = readProjectArchive(new Uint8Array(await file.arrayBuffer()));
+      setMaskError("");
+      fileInput.current?.click();
+    } catch (error) {
+      pendingProjectRef.current = null;
+      setMaskError(error instanceof Error ? error.message : "That Skyline project could not be opened.");
+      setMaskStatus("error");
+    }
+  };
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
   const downloadPoster = () => {
     if (!imageRef.current) return;
     const exportCanvas = document.createElement("canvas");
     drawPoster(exportCanvas, false);
     exportCanvas.toBlob((blob) => {
       if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${imageName.replace(/\.[^.]+$/, "") || "poster"}-skyline-poster.png`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      const baseName = imageName.replace(/\.[^.]+$/, "") || "poster";
+      triggerDownload(blob, `${baseName}-skyline-poster.png`);
+      const source = sourceFingerprintRef.current;
+      if (source && semanticLayers.length && analysisQuality !== "idle") {
+        const project: SkylineProjectV1 = {
+          schemaVersion: 1,
+          createdAt: new Date().toISOString(),
+          source,
+          analysis: serializeAnalysis(analysisQuality, skyMask, semanticLayers),
+          recipe: { schemaVersion: 1, activeTextLayerId, textLayers },
+        };
+        triggerDownload(new Blob([createProjectArchive(project)], { type: "application/octet-stream" }), `${baseName}.skyline.cfg`);
+      }
     }, "image/png");
   };
 
@@ -632,6 +592,8 @@ export default function Home() {
           <div className="panel-heading"><span className="step">01</span><div><p className="label">Source image</p><p className="hint">Mountains, coasts, cities, and trees all work.</p></div></div>
           <button className="upload-button" onClick={() => fileInput.current?.click()}>{imageName ? "Replace photograph" : "Choose a photograph"}</button>
           <input ref={fileInput} type="file" accept="image/*" hidden onChange={handleFile} />
+          <button type="button" className="project-button" onClick={() => projectInput.current?.click()}>Import .skyline.cfg project</button>
+          <input ref={projectInput} type="file" accept=".cfg,.skyline.cfg,application/octet-stream" hidden onChange={(event) => { void handleProject(event); }} />
           {imageName && <p className="file-meta"><span>{imageName}</span><span>{dimensions}</span></p>}
         </section>
         <section className="control-section">
@@ -695,7 +657,7 @@ export default function Home() {
           </>}
           <Toggle checked={showMask} onChange={setShowMask} label="Show colored layer overlay" />
         </section>
-        <button className="download-button" disabled={!imageName || busy} onClick={downloadPoster}>{busy ? statusText : "Download full-resolution PNG"}</button>
+        <button className="download-button" disabled={!imageName || busy} onClick={downloadPoster}>{busy ? statusText : "Download PNG + project"}</button>
       </aside>
       <section className="preview-panel" aria-label="Poster preview">
         <div className="preview-topline"><div><span className={`status-dot ${semanticLayers.length ? "ready" : ""}`} />Live canvas</div><span>{imageName ? statusText : "Waiting for image"}</span></div>
@@ -708,7 +670,7 @@ export default function Home() {
 
 function Range({ idPrefix = "poster", label, value, min, max, suffix, onChange }: { idPrefix?: string; label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
   const id = `range-${idPrefix}-${label.toLowerCase().replaceAll(" ", "-")}`;
-  return <div className="range-field"><span><label htmlFor={id}><b>{label}</b></label><output htmlFor={id}>{value}{suffix}</output></span><input id={id} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></div>;
+  return <div className="range-field"><span><label htmlFor={id}><b>{label}</b></label><output htmlFor={id}><input aria-label={`${label} value`} type="number" min={min} max={max} value={value} onChange={(event) => onChange(Math.min(max, Math.max(min, Number(event.target.value))))} />{suffix}</output></span><input id={id} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></div>;
 }
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) {

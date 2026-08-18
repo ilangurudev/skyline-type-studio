@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skyline-type-studio.local/recipe.schema.json",
+  "title": "Skyline Type Studio Recipe v1",
+  "type": "object",
+  "required": ["schemaVersion", "activeTextLayerId", "textLayers"],
+  "additionalProperties": true,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "activeTextLayerId": { "type": "string", "minLength": 1 },
+    "textLayers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "text", "font", "fontSize", "lineGap", "xPosition", "yPosition", "alignment", "textColor", "shadowColor", "shadow", "extrusion", "extrusionColor", "extrusionDepth", "extrusionAngle", "frontLayerIds"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string" },
+          "text": { "type": "string" },
+          "font": { "type": "string", "minLength": 1 },
+          "fontSize": { "type": "number", "minimum": 1, "maximum": 100 },
+          "lineGap": { "type": "number", "minimum": -90, "maximum": 300 },
+          "xPosition": { "type": "number", "minimum": 0, "maximum": 100 },
+          "yPosition": { "type": "number", "minimum": 0, "maximum": 100 },
+          "alignment": { "enum": ["left", "center", "right"] },
+          "textColor": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+          "shadowColor": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+          "shadow": { "type": "boolean" },
+          "extrusion": { "type": "boolean" },
+          "extrusionColor": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+          "extrusionDepth": { "type": "number", "minimum": 0, "maximum": 100 },
+          "extrusionAngle": { "type": "number", "minimum": -360, "maximum": 360 },
+          "frontLayerIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        }
+      }
+    }
+  }
+}
