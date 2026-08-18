@@ -4,13 +4,18 @@ import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from
 
 type TextAlign = "left" | "center" | "right";
 type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
-type SemanticLayer = BinaryMask & { id: string; label: string; color: [number, number, number]; coverage: number; averageY: number };
+type BaseSemanticMask = BinaryMask & { label: string; sourceIndex: number; averageY: number };
+type SemanticLayer = BinaryMask & { id: string; label: string; color: [number, number, number]; coverage: number; depthScore: number };
 type MaskStatus = "idle" | "loading-model" | "analyzing" | "ready" | "error";
 type Segment = { label?: string; mask: { width: number; height: number; data: ArrayLike<number> } };
 type Segmenter = (input: HTMLCanvasElement) => Promise<Segment[]>;
+type DepthOutput = { predicted_depth?: { dims?: number[]; data?: ArrayLike<number> }; depth?: { width: number; height: number; data: ArrayLike<number> } };
+type DepthEstimator = (input: HTMLCanvasElement) => Promise<DepthOutput>;
 
 const MODEL_ID = "Xenova/segformer-b0-finetuned-ade-512-512";
+const DEPTH_MODEL_ID = "onnx-community/depth-anything-v2-small";
 let segmenterPromise: Promise<Segmenter> | null = null;
+let depthEstimatorPromise: Promise<DepthEstimator> | null = null;
 
 const LAYER_COLORS: Array<[number, number, number]> = [
   [217, 255, 72], [255, 112, 84], [255, 194, 66], [162, 117, 255],
@@ -34,6 +39,16 @@ async function getSegmenter() {
     });
   }
   return segmenterPromise;
+}
+
+async function getDepthEstimator() {
+  if (!depthEstimatorPromise) {
+    depthEstimatorPromise = import("@huggingface/transformers").then(async ({ pipeline }) => {
+      const model = await pipeline("depth-estimation", DEPTH_MODEL_ID, { dtype: "q8", device: "wasm" });
+      return model as unknown as DepthEstimator;
+    });
+  }
+  return depthEstimatorPromise;
 }
 
 function cleanSkyMask(input: ArrayLike<number>, width: number, height: number) {
@@ -73,6 +88,217 @@ function titleCase(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function semanticGroup(label: string) {
+  const value = label.toLowerCase();
+  if (["mountain", "earth", "rock", "sand", "grass", "field", "road", "hill", "land"].includes(value)) return "Terrain";
+  if (["tree", "plant", "palm", "flower", "bush"].includes(value)) return "Vegetation";
+  if (["building", "skyscraper", "house", "wall", "tower", "bridge", "fence"].includes(value)) return "Architecture";
+  if (["sea", "water", "river", "lake", "waterfall"].includes(value)) return "Water";
+  if (["person", "people", "man", "woman"].includes(value)) return "People";
+  return titleCase(label);
+}
+
+function groupSemanticMasks(baseMasks: BaseSemanticMask[]) {
+  const groups = new Map<string, BaseSemanticMask>();
+  for (const mask of baseMasks) {
+    const label = semanticGroup(mask.label);
+    const existing = groups.get(label);
+    if (!existing) {
+      groups.set(label, { ...mask, label, data: new Uint8ClampedArray(mask.data) });
+      continue;
+    }
+    for (let index = 0; index < existing.data.length; index += 1) if (mask.data[index]) existing.data[index] = 255;
+  }
+  let grouped = [...groups.values()].map((mask, index) => {
+    let count = 0;
+    let yTotal = 0;
+    for (let pixelIndex = 0; pixelIndex < mask.data.length; pixelIndex += 1) {
+      if (!mask.data[pixelIndex]) continue;
+      count += 1;
+      yTotal += Math.floor(pixelIndex / mask.width);
+    }
+    return { ...mask, sourceIndex: index, averageY: count ? yTotal / count : 0 };
+  });
+
+  const terrain = grouped.find((mask) => mask.label === "Terrain");
+  const water = grouped.find((mask) => mask.label === "Water");
+  if (terrain && water) {
+    const waterPixels = water.data.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+    const terrainPixels = terrain.data.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+    if (waterPixels / water.data.length < 0.018 && terrainPixels / terrain.data.length > 0.12) {
+      for (let index = 0; index < terrain.data.length; index += 1) if (water.data[index]) terrain.data[index] = 255;
+      grouped = grouped.filter((mask) => mask !== water);
+    }
+  }
+  return grouped.map((mask, index) => {
+    let count = 0;
+    let yTotal = 0;
+    for (let pixelIndex = 0; pixelIndex < mask.data.length; pixelIndex += 1) {
+      if (!mask.data[pixelIndex]) continue;
+      count += 1;
+      yTotal += Math.floor(pixelIndex / mask.width);
+    }
+    return { ...mask, sourceIndex: index, averageY: count ? yTotal / count : 0 };
+  });
+}
+
+function resizeDepthMap(output: DepthOutput | null, width: number, height: number) {
+  const tensor = output?.predicted_depth;
+  const raw = tensor?.data ?? output?.depth?.data;
+  if (!raw?.length) return null;
+  const dims = tensor?.dims;
+  const sourceHeight = dims?.at(-2) ?? output?.depth?.height ?? height;
+  const sourceWidth = dims?.at(-1) ?? output?.depth?.width ?? width;
+  const resized = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = Math.min(sourceHeight - 1, Math.round((y / Math.max(1, height - 1)) * (sourceHeight - 1)));
+    for (let x = 0; x < width; x += 1) {
+      const sourceX = Math.min(sourceWidth - 1, Math.round((x / Math.max(1, width - 1)) * (sourceWidth - 1)));
+      resized[y * width + x] = Number(raw[sourceY * sourceWidth + sourceX] ?? 0);
+    }
+  }
+  return resized;
+}
+
+function smoothDepthMap(input: Float32Array, width: number, height: number) {
+  const horizontal = new Float32Array(input.length);
+  const output = new Float32Array(input.length);
+  const radius = 2;
+  for (let y = 0; y < height; y += 1) {
+    let sum = 0;
+    for (let x = -radius; x <= radius; x += 1) sum += input[y * width + Math.max(0, Math.min(width - 1, x))];
+    for (let x = 0; x < width; x += 1) {
+      horizontal[y * width + x] = sum / (radius * 2 + 1);
+      sum -= input[y * width + Math.max(0, x - radius)];
+      sum += input[y * width + Math.min(width - 1, x + radius + 1)];
+    }
+  }
+  for (let x = 0; x < width; x += 1) {
+    let sum = 0;
+    for (let y = -radius; y <= radius; y += 1) sum += horizontal[Math.max(0, Math.min(height - 1, y)) * width + x];
+    for (let y = 0; y < height; y += 1) {
+      output[y * width + x] = sum / (radius * 2 + 1);
+      sum -= horizontal[Math.max(0, y - radius) * width + x];
+      sum += horizontal[Math.min(height - 1, y + radius + 1) * width + x];
+    }
+  }
+  return output;
+}
+
+function percentile(sorted: number[], amount: number) {
+  return sorted[Math.max(0, Math.min(sorted.length - 1, Math.round((sorted.length - 1) * amount)))] ?? 0;
+}
+
+function buildDepthClusters(depth: Float32Array | null, foreground: Uint8Array) {
+  if (!depth) return null;
+  const sample: number[] = [];
+  const stride = Math.max(1, Math.floor(depth.length / 50000));
+  for (let index = 0; index < depth.length; index += stride) {
+    if (foreground[index] && Number.isFinite(depth[index])) sample.push(depth[index]);
+  }
+  if (sample.length < 100) return null;
+  sample.sort((a, b) => a - b);
+  const low = percentile(sample, 0.04);
+  const high = percentile(sample, 0.96);
+  if (high - low < 1e-5) return null;
+  const normalize = (value: number) => Math.max(0, Math.min(1, (value - low) / (high - low)));
+  const normalizedSample = sample.map(normalize);
+  let centers = [percentile(normalizedSample, 0.2), percentile(normalizedSample, 0.5), percentile(normalizedSample, 0.8)];
+  for (let iteration = 0; iteration < 8; iteration += 1) {
+    const sums = [0, 0, 0];
+    const counts = [0, 0, 0];
+    for (const value of normalizedSample) {
+      let closest = 0;
+      if (Math.abs(value - centers[1]) < Math.abs(value - centers[closest])) closest = 1;
+      if (Math.abs(value - centers[2]) < Math.abs(value - centers[closest])) closest = 2;
+      sums[closest] += value;
+      counts[closest] += 1;
+    }
+    centers = centers.map((center, index) => counts[index] ? sums[index] / counts[index] : center).sort((a, b) => a - b);
+  }
+  if (centers[2] - centers[0] < 0.16) return null;
+  const normalized = Float32Array.from(depth, normalize);
+  const bands = new Uint8Array(depth.length);
+  for (let index = 0; index < normalized.length; index += 1) {
+    const value = normalized[index];
+    let closest = 0;
+    if (Math.abs(value - centers[1]) < Math.abs(value - centers[closest])) closest = 1;
+    if (Math.abs(value - centers[2]) < Math.abs(value - centers[closest])) closest = 2;
+    bands[index] = closest;
+  }
+  return { normalized, bands, centers };
+}
+
+function createDepthLayers(baseMasks: BaseSemanticMask[], depth: Float32Array | null) {
+  if (!baseMasks.length) return { layers: [] as SemanticLayer[], depthEnhanced: false };
+  const { width, height } = baseMasks[0];
+  const pixelTotal = width * height;
+  const foreground = new Uint8Array(pixelTotal);
+  for (const mask of baseMasks) {
+    for (let index = 0; index < pixelTotal; index += 1) if (mask.data[index]) foreground[index] = 1;
+  }
+  const clusters = buildDepthClusters(depth ? smoothDepthMap(depth, width, height) : null, foreground);
+  const layers: SemanticLayer[] = [];
+  let colorIndex = 0;
+
+  for (const base of baseMasks) {
+    const baseCount = base.data.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+    const baseCoverage = baseCount / pixelTotal;
+    const counts = [0, 0, 0];
+    if (clusters) {
+      for (let index = 0; index < pixelTotal; index += 1) if (base.data[index]) counts[clusters.bands[index]] += 1;
+    }
+    const presentBands = counts.map((count, band) => ({ count, band })).filter(({ count }) => count / pixelTotal >= 0.0045);
+    const shouldSplit = Boolean(clusters && baseCoverage >= 0.025 && presentBands.length >= 2);
+
+    if (shouldSplit && clusters) {
+      const activeBands = presentBands.map(({ band }) => band);
+      for (const band of [...activeBands].sort((a, b) => b - a)) {
+        let assignedCount = 0;
+        const data = Uint8ClampedArray.from(base.data, (value, index) => {
+          if (!value) return 0;
+          const sourceBand = clusters.bands[index];
+          const assignedBand = activeBands.reduce((closest, candidate) => Math.abs(candidate - sourceBand) < Math.abs(closest - sourceBand) ? candidate : closest, activeBands[0]);
+          if (assignedBand !== band) return 0;
+          assignedCount += 1;
+          return 255;
+        });
+        const names = ["Far", "Middle", "Near"];
+        layers.push({
+          id: `${base.label.toLowerCase().replaceAll(" ", "-")}-${names[band].toLowerCase()}-${base.sourceIndex}`,
+          label: `${titleCase(base.label)} · ${names[band]}`,
+          width,
+          height,
+          data,
+          color: LAYER_COLORS[colorIndex++ % LAYER_COLORS.length],
+          coverage: assignedCount / pixelTotal,
+          depthScore: clusters.centers[band],
+        });
+      }
+    } else {
+      let depthTotal = 0;
+      if (clusters) {
+        for (let index = 0; index < pixelTotal; index += 1) if (base.data[index]) depthTotal += clusters.normalized[index];
+      }
+      layers.push({
+        id: `${base.label.toLowerCase().replaceAll(" ", "-")}-${base.sourceIndex}`,
+        label: titleCase(base.label),
+        width,
+        height,
+        data: base.data,
+        color: LAYER_COLORS[colorIndex++ % LAYER_COLORS.length],
+        coverage: baseCoverage,
+        depthScore: clusters && baseCount ? depthTotal / baseCount : base.averageY / Math.max(1, height),
+      });
+    }
+  }
+
+  return {
+    layers: layers.filter((layer) => layer.coverage >= 0.00075).sort((a, b) => b.depthScore - a.depthScore),
+    depthEnhanced: Boolean(clusters),
+  };
+}
+
 function createMaskCanvas(mask: BinaryMask) {
   const canvas = document.createElement("canvas");
   canvas.width = mask.width;
@@ -110,6 +336,7 @@ export default function Home() {
   const [dimensions, setDimensions] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [maskStatus, setMaskStatus] = useState<MaskStatus>("idle");
+  const [analysisQuality, setAnalysisQuality] = useState<"idle" | "semantic" | "depth">("idle");
   const [maskError, setMaskError] = useState("");
   const [skyMask, setSkyMask] = useState<BinaryMask | null>(null);
   const [semanticLayers, setSemanticLayers] = useState<SemanticLayer[]>([]);
@@ -210,10 +437,18 @@ export default function Home() {
     setSkyMask(null);
     setSemanticLayers([]);
     setFrontLayerIds([]);
+    setAnalysisQuality("idle");
     setMaskError("");
     setMaskStatus("loading-model");
     try {
-      const segmenter = await getSegmenter();
+      const [segmenter, depthEstimator] = await Promise.all([
+        getSegmenter(),
+        getDepthEstimator().catch((error) => {
+          console.warn("Depth model unavailable; continuing with semantic layers.", error);
+          depthEstimatorPromise = null;
+          return null;
+        }),
+      ]);
       if (sequence !== analysisSequence.current) return;
       setMaskStatus("analyzing");
       const scale = Math.min(1, 1024 / Math.max(image.naturalWidth, image.naturalHeight));
@@ -223,11 +458,16 @@ export default function Home() {
       analysis.getContext("2d")!.drawImage(image, 0, 0, analysis.width, analysis.height);
       const segments = await segmenter(analysis);
       if (sequence !== analysisSequence.current) return;
+      const depthOutput = depthEstimator ? await depthEstimator(analysis).catch((error) => {
+        console.warn("Depth analysis failed; continuing with semantic layers.", error);
+        return null;
+      }) : null;
+      if (sequence !== analysisSequence.current) return;
       const sky = segments.find((segment) => segment.label?.toLowerCase() === "sky");
       const cleanSky = sky ? cleanSkyMask(sky.mask.data, sky.mask.width, sky.mask.height) : null;
       if (sky && cleanSky) setSkyMask({ width: sky.mask.width, height: sky.mask.height, data: cleanSky });
 
-      const layers = segments
+      const baseMasks = segments
         .filter((segment) => segment.label?.toLowerCase() !== "sky")
         .map((segment, index) => {
           const { width, height } = segment.mask;
@@ -244,26 +484,27 @@ export default function Home() {
           }
           const label = segment.label || `Layer ${index + 1}`;
           return {
-            id: `${label.toLowerCase().replaceAll(" ", "-")}-${index}`,
-            label: titleCase(label),
+            label,
+            sourceIndex: index,
             width,
             height,
             data,
-            color: LAYER_COLORS[index % LAYER_COLORS.length],
-            coverage: pixelCount / Math.max(1, width * height),
             averageY: pixelCount ? yTotal / pixelCount : 0,
-          } satisfies SemanticLayer;
-        })
-        .filter((layer) => layer.coverage >= 0.00008)
-        .sort((a, b) => b.averageY - a.averageY);
+          } satisfies BaseSemanticMask;
+        });
 
+      if (!baseMasks.length) throw new Error("No distinct image layers were detected in this photograph.");
+      const groupedMasks = groupSemanticMasks(baseMasks);
+      const depthMap = resizeDepthMap(depthOutput, groupedMasks[0].width, groupedMasks[0].height);
+      const { layers, depthEnhanced } = createDepthLayers(groupedMasks, depthMap);
       if (!layers.length) throw new Error("No distinct depth layers were detected in this photograph.");
       setSemanticLayers(layers);
       setFrontLayerIds(layers.map((layer) => layer.id));
+      setAnalysisQuality(depthEnhanced ? "depth" : "semantic");
       setMaskStatus("ready");
     } catch (error) {
       console.error(error);
-      setMaskError(error instanceof Error ? error.message : "The sky model could not run in this browser.");
+      setMaskError(error instanceof Error ? error.message : "The vision models could not run in this browser.");
       setMaskStatus("error");
     }
   }, []);
@@ -306,10 +547,10 @@ export default function Home() {
   };
 
   const busy = maskStatus === "loading-model" || maskStatus === "analyzing";
-  const statusText = maskStatus === "loading-model" ? "Loading precision model…" : maskStatus === "analyzing" ? "Building depth layers…" : maskStatus === "ready" ? `${semanticLayers.length} depth layer${semanticLayers.length === 1 ? "" : "s"} ready` : maskStatus === "error" ? "Layers unavailable" : "Waiting for image";
+  const statusText = maskStatus === "loading-model" ? "Loading segmentation + depth…" : maskStatus === "analyzing" ? "Tracing depth planes…" : maskStatus === "ready" ? `${semanticLayers.length} depth layer${semanticLayers.length === 1 ? "" : "s"} ready` : maskStatus === "error" ? "Layers unavailable" : "Waiting for image";
 
   return <main className="studio-shell">
-    <header className="masthead"><div><p className="eyebrow">Browser-based poster maker</p><h1>Skyline Type Studio</h1></div><p className="privacy-note">Your photograph stays in this browser.</p></header>
+    <header className="masthead"><div><p className="eyebrow">Browser-based poster maker</p><h1>Skyline Type Studio</h1></div><p className="privacy-note">Models download once. Your photograph stays in this browser.</p></header>
     <section className="workspace">
       <aside className="control-panel" aria-label="Poster controls">
         <section className="control-section">
@@ -336,8 +577,9 @@ export default function Home() {
           <Toggle checked={shadow} onChange={setShadow} label="Hard offset shadow" />
         </section>
         <section className="control-section mask-section">
-          <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth layers</p><p className="hint">Choose which detected objects cover the text.</p></div></div>
+          <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth layers</p><p className="hint">Semantic objects are split into near, middle, and far planes.</p></div></div>
           <div className={`mask-readout ${maskStatus}`}><span className="status-dot" />{statusText}</div>
+          {maskStatus === "ready" && <p className={`quality-badge ${analysisQuality}`}>{analysisQuality === "depth" ? "Depth-enhanced analysis" : "Semantic fallback"}</p>}
           {maskError && <p className="mask-error">{maskError}</p>}
           {semanticLayers.length > 0 && <>
             <div className="depth-presets" aria-label="Depth presets">

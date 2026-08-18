@@ -100,6 +100,12 @@ input[type="color"] { width: 30px; height: 25px; padding: 0; border: 0; backgrou
 .mask-readout.ready .status-dot { background: #4f9f44; }
 .mask-readout.error .status-dot { background: #d44b36; }
 .mask-error { margin: 8px 0 0; color: #a33a2c; font-size: 11px; line-height: 1.35; }
+.quality-badge {
+  width: fit-content; margin: 7px 0 0; padding: 5px 7px; border: 1px solid var(--line);
+  background: white; color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em;
+}
+.quality-badge.depth { border-color: #89a522; background: #f4ffd0; color: #485c00; }
+.quality-badge.semantic { border-color: #d79a46; background: #fff0d8; color: #805319; }
 .depth-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
 .depth-presets button {
   min-height: 34px; border: 1px solid var(--line); background: white; cursor: pointer;
