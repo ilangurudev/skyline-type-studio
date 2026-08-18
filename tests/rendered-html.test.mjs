@@ -20,8 +20,9 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /<title>Skyline Type Studio<\/title>/i);
   assert.match(html, /Choose a photograph/i);
   assert.match(html, /Poster text/i);
-  assert.match(html, /Sky mask/i);
-  assert.match(html, /semantic model traces detailed silhouettes/i);
+  assert.match(html, /Depth layers/i);
+  assert.match(html, /Choose which detected objects cover the text/i);
+  assert.match(html, /Show colored layer overlay/i);
   assert.match(html, /Download full-resolution PNG/i);
   assert.doesNotMatch(html, /Horizon guide/i);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/i);

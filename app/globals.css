@@ -100,6 +100,34 @@ input[type="color"] { width: 30px; height: 25px; padding: 0; border: 0; backgrou
 .mask-readout.ready .status-dot { background: #4f9f44; }
 .mask-readout.error .status-dot { background: #d44b36; }
 .mask-error { margin: 8px 0 0; color: #a33a2c; font-size: 11px; line-height: 1.35; }
+.depth-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
+.depth-presets button {
+  min-height: 34px; border: 1px solid var(--line); background: white; cursor: pointer;
+  font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em;
+}
+.depth-presets button:hover { border-color: var(--ink); }
+.depth-stack { margin-top: 10px; border: 1px solid var(--line); background: #e9e5dc; }
+.stack-cap {
+  display: flex; justify-content: space-between; padding: 7px 9px; color: var(--muted);
+  font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .1em;
+}
+.depth-layer, .base-layer, .text-layer-marker {
+  display: flex; align-items: center; min-height: 43px; gap: 8px; padding: 6px 7px;
+  border-top: 1px solid var(--line); background: white;
+}
+.depth-layer.is-behind { opacity: .66; }
+.layer-swatch { width: 12px; height: 28px; flex: 0 0 auto; border: 1px solid rgba(0,0,0,.18); }
+.layer-swatch.sky-base { background: #49afff; }
+.layer-name { min-width: 0; flex: 1; font-size: 11px; font-weight: 800; }
+.layer-name small, .base-layer small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; font-weight: 500; }
+.depth-choice { display: grid; grid-template-columns: 1fr 1fr; flex: 0 0 118px; border: 1px solid var(--line); }
+.depth-choice button { min-width: 0; height: 27px; padding: 0 5px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 9px; font-weight: 800; }
+.depth-choice button + button { border-left: 1px solid var(--line); }
+.depth-choice button.active { background: var(--ink); color: white; }
+.text-layer-marker { background: var(--acid); border-color: var(--ink); }
+.text-layer-marker > span { width: 28px; height: 28px; display: grid; place-items: center; background: var(--ink); color: white; font: 900 15px/1 Georgia, serif; }
+.text-layer-marker b { font-size: 11px; }
+.base-layer > span:last-child { font-size: 11px; }
 @keyframes pulse { 50% { opacity: .35; } }
 
 .preview-panel { min-width: 0; padding: 20px; display: flex; flex-direction: column; background: #d9d5cc; }

@@ -3,13 +3,19 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type TextAlign = "left" | "center" | "right";
-type SkyMask = { width: number; height: number; data: Uint8ClampedArray };
+type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
+type SemanticLayer = BinaryMask & { id: string; label: string; color: [number, number, number]; coverage: number; averageY: number };
 type MaskStatus = "idle" | "loading-model" | "analyzing" | "ready" | "error";
 type Segment = { label?: string; mask: { width: number; height: number; data: ArrayLike<number> } };
 type Segmenter = (input: HTMLCanvasElement) => Promise<Segment[]>;
 
 const MODEL_ID = "Xenova/segformer-b0-finetuned-ade-512-512";
 let segmenterPromise: Promise<Segmenter> | null = null;
+
+const LAYER_COLORS: Array<[number, number, number]> = [
+  [217, 255, 72], [255, 112, 84], [255, 194, 66], [162, 117, 255],
+  [72, 224, 187], [255, 111, 193], [97, 155, 255], [231, 231, 90],
+];
 
 const FONT_OPTIONS = [
   ["Impact", "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif"],
@@ -63,7 +69,11 @@ function cleanSkyMask(input: ArrayLike<number>, width: number, height: number) {
   return sky;
 }
 
-function createMaskCanvas(mask: SkyMask, foreground: boolean) {
+function titleCase(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function createMaskCanvas(mask: BinaryMask) {
   const canvas = document.createElement("canvas");
   canvas.width = mask.width;
   canvas.height = mask.height;
@@ -72,10 +82,23 @@ function createMaskCanvas(mask: SkyMask, foreground: boolean) {
   for (let index = 0; index < mask.data.length; index += 1) {
     const offset = index * 4;
     pixels.data[offset] = pixels.data[offset + 1] = pixels.data[offset + 2] = 255;
-    pixels.data[offset + 3] = foreground ? 255 - mask.data[index] : mask.data[index];
+    pixels.data[offset + 3] = mask.data[index];
   }
   ctx.putImageData(pixels, 0, 0);
   return canvas;
+}
+
+function mergeMasks(layers: SemanticLayer[], layerIds: string[]): BinaryMask | null {
+  const selected = layers.filter((layer) => layerIds.includes(layer.id));
+  if (!selected.length) return null;
+  const { width, height } = selected[0];
+  const data = new Uint8ClampedArray(width * height);
+  for (const layer of selected) {
+    for (let index = 0; index < data.length; index += 1) {
+      if (layer.data[index] > data[index]) data[index] = layer.data[index];
+    }
+  }
+  return { width, height, data };
 }
 
 export default function Home() {
@@ -88,9 +111,11 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [maskStatus, setMaskStatus] = useState<MaskStatus>("idle");
   const [maskError, setMaskError] = useState("");
-  const [skyMask, setSkyMask] = useState<SkyMask | null>(null);
+  const [skyMask, setSkyMask] = useState<BinaryMask | null>(null);
+  const [semanticLayers, setSemanticLayers] = useState<SemanticLayer[]>([]);
+  const [frontLayerIds, setFrontLayerIds] = useState<string[]>([]);
   const [text, setText] = useState("ONE DESERT\nAFTER\nANOTHER");
-  const [font, setFont] = useState(FONT_OPTIONS[0][1]);
+  const [font, setFont] = useState<string>(FONT_OPTIONS[0][1]);
   const [fontSize, setFontSize] = useState(14);
   const [lineGap, setLineGap] = useState(18);
   const [xPosition, setXPosition] = useState(50);
@@ -99,7 +124,6 @@ export default function Home() {
   const [textColor, setTextColor] = useState("#f6edd7");
   const [shadowColor, setShadowColor] = useState("#3a2a22");
   const [shadow, setShadow] = useState(true);
-  const [behindLand, setBehindLand] = useState(true);
   const [showMask, setShowMask] = useState(false);
 
   const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false) => {
@@ -139,7 +163,8 @@ export default function Home() {
     });
     ctx.drawImage(typeLayer, 0, 0);
 
-    if (behindLand && skyMask) {
+    const frontMask = mergeMasks(semanticLayers, frontLayerIds);
+    if (frontMask) {
       const foreground = document.createElement("canvas");
       foreground.width = width;
       foreground.height = height;
@@ -147,32 +172,44 @@ export default function Home() {
       foregroundCtx.drawImage(image, 0, 0, width, height);
       foregroundCtx.globalCompositeOperation = "destination-in";
       foregroundCtx.imageSmoothingEnabled = true;
-      foregroundCtx.drawImage(createMaskCanvas(skyMask, true), 0, 0, width, height);
+      foregroundCtx.drawImage(createMaskCanvas(frontMask), 0, 0, width, height);
       ctx.drawImage(foreground, 0, 0);
     }
 
-    if (maskOverlay && skyMask) {
+    if (maskOverlay && (skyMask || semanticLayers.length)) {
       const overlay = document.createElement("canvas");
-      overlay.width = skyMask.width;
-      overlay.height = skyMask.height;
+      const reference = skyMask ?? semanticLayers[0];
+      overlay.width = reference.width;
+      overlay.height = reference.height;
       const overlayCtx = overlay.getContext("2d")!;
-      const pixels = overlayCtx.createImageData(skyMask.width, skyMask.height);
-      for (let index = 0; index < skyMask.data.length; index += 1) {
-        const isSky = skyMask.data[index] > 127;
+      const pixels = overlayCtx.createImageData(reference.width, reference.height);
+      for (let index = 0; index < reference.width * reference.height; index += 1) {
         const offset = index * 4;
-        pixels.data[offset] = isSky ? 73 : 217;
-        pixels.data[offset + 1] = isSky ? 175 : 255;
-        pixels.data[offset + 2] = isSky ? 255 : 72;
-        pixels.data[offset + 3] = isSky ? 82 : 54;
+        if (skyMask?.data[index]) {
+          pixels.data[offset] = 73;
+          pixels.data[offset + 1] = 175;
+          pixels.data[offset + 2] = 255;
+          pixels.data[offset + 3] = 64;
+        }
+        for (const layer of semanticLayers) {
+          if (!layer.data[index]) continue;
+          pixels.data[offset] = layer.color[0];
+          pixels.data[offset + 1] = layer.color[1];
+          pixels.data[offset + 2] = layer.color[2];
+          pixels.data[offset + 3] = frontLayerIds.includes(layer.id) ? 104 : 42;
+          break;
+        }
       }
       overlayCtx.putImageData(pixels, 0, 0);
       ctx.drawImage(overlay, 0, 0, width, height);
     }
-  }, [alignment, behindLand, font, fontSize, lineGap, shadow, shadowColor, skyMask, text, textColor, xPosition, yPosition]);
+  }, [alignment, font, fontSize, frontLayerIds, lineGap, semanticLayers, shadow, shadowColor, skyMask, text, textColor, xPosition, yPosition]);
 
   const analyzeImage = useCallback(async (image: HTMLImageElement) => {
     const sequence = ++analysisSequence.current;
     setSkyMask(null);
+    setSemanticLayers([]);
+    setFrontLayerIds([]);
     setMaskError("");
     setMaskStatus("loading-model");
     try {
@@ -187,8 +224,42 @@ export default function Home() {
       const segments = await segmenter(analysis);
       if (sequence !== analysisSequence.current) return;
       const sky = segments.find((segment) => segment.label?.toLowerCase() === "sky");
-      if (!sky) throw new Error("No sky was detected in this photograph.");
-      setSkyMask({ width: sky.mask.width, height: sky.mask.height, data: cleanSkyMask(sky.mask.data, sky.mask.width, sky.mask.height) });
+      const cleanSky = sky ? cleanSkyMask(sky.mask.data, sky.mask.width, sky.mask.height) : null;
+      if (sky && cleanSky) setSkyMask({ width: sky.mask.width, height: sky.mask.height, data: cleanSky });
+
+      const layers = segments
+        .filter((segment) => segment.label?.toLowerCase() !== "sky")
+        .map((segment, index) => {
+          const { width, height } = segment.mask;
+          const data = Uint8ClampedArray.from(segment.mask.data, (value, pixelIndex) => {
+            if (cleanSky?.[pixelIndex]) return 0;
+            return value > 127 ? 255 : 0;
+          });
+          let pixelCount = 0;
+          let yTotal = 0;
+          for (let pixelIndex = 0; pixelIndex < data.length; pixelIndex += 1) {
+            if (!data[pixelIndex]) continue;
+            pixelCount += 1;
+            yTotal += Math.floor(pixelIndex / width);
+          }
+          const label = segment.label || `Layer ${index + 1}`;
+          return {
+            id: `${label.toLowerCase().replaceAll(" ", "-")}-${index}`,
+            label: titleCase(label),
+            width,
+            height,
+            data,
+            color: LAYER_COLORS[index % LAYER_COLORS.length],
+            coverage: pixelCount / Math.max(1, width * height),
+            averageY: pixelCount ? yTotal / pixelCount : 0,
+          } satisfies SemanticLayer;
+        })
+        .filter((layer) => layer.coverage >= 0.00008)
+        .sort((a, b) => b.averageY - a.averageY);
+
+      if (!layers.length) throw new Error("No distinct depth layers were detected in this photograph.");
+      setSemanticLayers(layers);
+      setFrontLayerIds(layers.map((layer) => layer.id));
       setMaskStatus("ready");
     } catch (error) {
       console.error(error);
@@ -196,6 +267,10 @@ export default function Home() {
       setMaskStatus("error");
     }
   }, []);
+
+  const setLayerInFront = (layerId: string, inFront: boolean) => {
+    setFrontLayerIds((current) => inFront ? [...new Set([...current, layerId])] : current.filter((id) => id !== layerId));
+  };
 
   useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask); }, [drawPoster, showMask]);
 
@@ -231,7 +306,7 @@ export default function Home() {
   };
 
   const busy = maskStatus === "loading-model" || maskStatus === "analyzing";
-  const statusText = maskStatus === "loading-model" ? "Loading precision model…" : maskStatus === "analyzing" ? "Separating sky…" : maskStatus === "ready" ? "Semantic mask ready" : maskStatus === "error" ? "Mask unavailable" : "Waiting for image";
+  const statusText = maskStatus === "loading-model" ? "Loading precision model…" : maskStatus === "analyzing" ? "Building depth layers…" : maskStatus === "ready" ? `${semanticLayers.length} depth layer${semanticLayers.length === 1 ? "" : "s"} ready` : maskStatus === "error" ? "Layers unavailable" : "Waiting for image";
 
   return <main className="studio-shell">
     <header className="masthead"><div><p className="eyebrow">Browser-based poster maker</p><h1>Skyline Type Studio</h1></div><p className="privacy-note">Your photograph stays in this browser.</p></header>
@@ -261,18 +336,30 @@ export default function Home() {
           <Toggle checked={shadow} onChange={setShadow} label="Hard offset shadow" />
         </section>
         <section className="control-section mask-section">
-          <div className="panel-heading"><span className="step">03</span><div><p className="label">Sky mask</p><p className="hint">A semantic model traces detailed silhouettes automatically.</p></div></div>
+          <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth layers</p><p className="hint">Choose which detected objects cover the text.</p></div></div>
           <div className={`mask-readout ${maskStatus}`}><span className="status-dot" />{statusText}</div>
           {maskError && <p className="mask-error">{maskError}</p>}
-          <Toggle checked={behindLand} onChange={setBehindLand} label="Place text behind foreground" />
-          <Toggle checked={showMask} onChange={setShowMask} label="Show sky / foreground overlay" />
+          {semanticLayers.length > 0 && <>
+            <div className="depth-presets" aria-label="Depth presets">
+              <button type="button" onClick={() => setFrontLayerIds(semanticLayers.map((layer) => layer.id))}>All in front</button>
+              <button type="button" onClick={() => setFrontLayerIds([])}>Text on top</button>
+            </div>
+            <div className="depth-stack" aria-label="Detected image layers">
+              <div className="stack-cap"><span>Closer</span><span>Object depth</span></div>
+              {semanticLayers.filter((layer) => frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront onChange={setLayerInFront} />)}
+              <div className="text-layer-marker"><span>T</span><b>Your text layer</b></div>
+              {semanticLayers.filter((layer) => !frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront={false} onChange={setLayerInFront} />)}
+              <div className="base-layer"><span className="layer-swatch sky-base" /><span><b>Original photo</b><small>Base layer</small></span></div>
+            </div>
+          </>}
+          <Toggle checked={showMask} onChange={setShowMask} label="Show colored layer overlay" />
         </section>
-        <button className="download-button" disabled={!imageName || busy || (behindLand && !skyMask)} onClick={downloadPoster}>{busy ? statusText : "Download full-resolution PNG"}</button>
+        <button className="download-button" disabled={!imageName || busy} onClick={downloadPoster}>{busy ? statusText : "Download full-resolution PNG"}</button>
       </aside>
       <section className="preview-panel" aria-label="Poster preview">
-        <div className="preview-topline"><div><span className={`status-dot ${skyMask ? "ready" : ""}`} />Live canvas</div><span>{imageName ? statusText : "Waiting for image"}</span></div>
+        <div className="preview-topline"><div><span className={`status-dot ${semanticLayers.length ? "ready" : ""}`} />Live canvas</div><span>{imageName ? statusText : "Waiting for image"}</span></div>
         {!imageName ? <div className={`drop-zone ${isDragging ? "dragging" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInput.current?.click(); }}><span className="drop-mark">＋</span><strong>Drop a photograph here</strong><small>or click to browse · JPEG, PNG, WebP</small></div> : <div className="canvas-stage"><canvas ref={canvasRef} aria-label="Live poster preview" />{busy && <div className="calculating-chip">{statusText}</div>}</div>}
-        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky</span><span><i className="key-swatch land" />Foreground</span><span className="footer-tip">Blue stays behind the type; lime is redrawn in front for the cut-through effect.</span></footer>
+        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">Set each object behind or in front of your text to build a custom depth stack.</span></footer>
       </section>
     </section>
   </main>;
@@ -285,4 +372,15 @@ function Range({ label, value, min, max, suffix, onChange }: { label: string; va
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) {
   return <label className="toggle-row"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="toggle-track"><i /></span><b>{label}</b></label>;
+}
+
+function DepthLayerRow({ layer, inFront, onChange }: { layer: SemanticLayer; inFront: boolean; onChange: (layerId: string, inFront: boolean) => void }) {
+  return <div className={`depth-layer ${inFront ? "is-front" : "is-behind"}`}>
+    <span className="layer-swatch" style={{ backgroundColor: `rgb(${layer.color.join(",")})` }} />
+    <span className="layer-name">{layer.label}<small>{Math.max(0.1, layer.coverage * 100).toFixed(1)}%</small></span>
+    <span className="depth-choice" role="group" aria-label={`${layer.label} text depth`}>
+      <button type="button" className={!inFront ? "active" : ""} aria-pressed={!inFront} onClick={() => onChange(layer.id, false)}>Behind</button>
+      <button type="button" className={inFront ? "active" : ""} aria-pressed={inFront} onClick={() => onChange(layer.id, true)}>In front</button>
+    </span>
+  </div>;
 }
