@@ -1,6 +1,14 @@
 import type { BinaryMask, LayerAnimation, SemanticLayer, TextLayer, TimelineSettings } from "./types";
 
+const maskCanvasCache = new WeakMap<BinaryMask, HTMLCanvasElement>();
+const fittedMaskCache = new WeakMap<BinaryMask, Map<string, HTMLCanvasElement>>();
+const maskedImageCache = new WeakMap<HTMLImageElement, WeakMap<BinaryMask, Map<string, HTMLCanvasElement>>>();
+const inverseMaskedImageCache = new WeakMap<HTMLImageElement, WeakMap<BinaryMask, Map<string, HTMLCanvasElement>>>();
+const mergedSceneMaskCache = new WeakMap<SemanticLayer[], BinaryMask | null>();
+
 function createMaskCanvas(mask: BinaryMask) {
+  const cached = maskCanvasCache.get(mask);
+  if (cached) return cached;
   const canvas = document.createElement("canvas");
   canvas.width = mask.width;
   canvas.height = mask.height;
@@ -12,6 +20,7 @@ function createMaskCanvas(mask: BinaryMask) {
     pixels.data[offset + 3] = mask.data[index];
   }
   ctx.putImageData(pixels, 0, 0);
+  maskCanvasCache.set(mask, canvas);
   return canvas;
 }
 
@@ -24,6 +33,13 @@ function mergeMasks(layers: SemanticLayer[], layerIds: string[]): BinaryMask | n
     for (let index = 0; index < data.length; index += 1) if (layer.data[index] > data[index]) data[index] = layer.data[index];
   }
   return { width, height, data };
+}
+
+function allSceneMask(layers: SemanticLayer[]) {
+  if (mergedSceneMaskCache.has(layers)) return mergedSceneMaskCache.get(layers) ?? null;
+  const mask = mergeMasks(layers, layers.map((layer) => layer.id));
+  mergedSceneMaskCache.set(layers, mask);
+  return mask;
 }
 
 const STATIC_ANIMATION: LayerAnimation = { enabled: false, effect: "fade", delay: 0, duration: 1 };
@@ -63,14 +79,66 @@ function drawTransformed(ctx: CanvasRenderingContext2D, source: CanvasImageSourc
   ctx.restore();
 }
 
-function maskedImage(image: HTMLImageElement, mask: BinaryMask, width: number, height: number) {
+function drawCover(ctx: CanvasRenderingContext2D, source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number) {
+  const scale = Math.max(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  ctx.drawImage(source, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+}
+
+function fittedMask(mask: BinaryMask, width: number, height: number, cover: boolean) {
+  const source = createMaskCanvas(mask);
+  if (!cover) return source;
+  const cacheKey = `${width}x${height}`;
+  const cached = fittedMaskCache.get(mask)?.get(cacheKey);
+  if (cached) return cached;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  drawCover(canvas.getContext("2d")!, source, mask.width, mask.height, width, height);
+  const entries = fittedMaskCache.get(mask) ?? new Map<string, HTMLCanvasElement>();
+  entries.set(cacheKey, canvas);
+  fittedMaskCache.set(mask, entries);
+  return canvas;
+}
+
+function maskedImage(image: HTMLImageElement, mask: BinaryMask, width: number, height: number, cover: boolean) {
+  const cacheKey = `${width}x${height}:${cover ? "cover" : "stretch"}`;
+  const byMask = maskedImageCache.get(image) ?? new WeakMap<BinaryMask, Map<string, HTMLCanvasElement>>();
+  const cached = byMask.get(mask)?.get(cacheKey);
+  if (cached) return cached;
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(image, 0, 0, width, height);
+  if (cover) drawCover(ctx, image, image.naturalWidth, image.naturalHeight, width, height);
+  else ctx.drawImage(image, 0, 0, width, height);
   ctx.globalCompositeOperation = "destination-in";
-  ctx.drawImage(createMaskCanvas(mask), 0, 0, width, height);
+  ctx.drawImage(fittedMask(mask, width, height, cover), 0, 0, width, height);
+  const entries = byMask.get(mask) ?? new Map<string, HTMLCanvasElement>();
+  entries.set(cacheKey, canvas);
+  byMask.set(mask, entries);
+  maskedImageCache.set(image, byMask);
+  return canvas;
+}
+
+function imageWithoutMask(image: HTMLImageElement, mask: BinaryMask, width: number, height: number, cover: boolean) {
+  const cacheKey = `${width}x${height}:${cover ? "cover" : "stretch"}`;
+  const byMask = inverseMaskedImageCache.get(image) ?? new WeakMap<BinaryMask, Map<string, HTMLCanvasElement>>();
+  const cached = byMask.get(mask)?.get(cacheKey);
+  if (cached) return cached;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d")!;
+  if (cover) drawCover(ctx, image, image.naturalWidth, image.naturalHeight, width, height);
+  else ctx.drawImage(image, 0, 0, width, height);
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.drawImage(fittedMask(mask, width, height, cover), 0, 0, width, height);
+  const entries = byMask.get(mask) ?? new Map<string, HTMLCanvasElement>();
+  entries.set(cacheKey, canvas);
+  byMask.set(mask, entries);
+  inverseMaskedImageCache.set(image, byMask);
   return canvas;
 }
 
@@ -83,6 +151,7 @@ export function renderPoster({
   activeTextLayerId,
   maskOverlay = false,
   maxDimension,
+  outputDimensions,
   time,
   timeline,
 }: {
@@ -94,13 +163,15 @@ export function renderPoster({
   activeTextLayerId?: string;
   maskOverlay?: boolean;
   maxDimension?: number;
+  outputDimensions?: { width: number; height: number };
   time?: number;
   timeline?: TimelineSettings;
 }) {
   const longestEdge = Math.max(image.naturalWidth, image.naturalHeight);
   const scale = maxDimension ? Math.min(1, maxDimension / longestEdge) : 1;
-  const width = Math.max(1, Math.round(image.naturalWidth * scale));
-  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const width = outputDimensions?.width ?? Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = outputDimensions?.height ?? Math.max(1, Math.round(image.naturalHeight * scale));
+  const cover = Boolean(outputDimensions);
   target.width = width;
   target.height = height;
   const ctx = target.getContext("2d");
@@ -108,26 +179,29 @@ export function renderPoster({
   if (time !== undefined && timeline) {
     ctx.fillStyle = timeline.backgroundColor;
     ctx.fillRect(0, 0, width, height);
-    const allSceneMask = mergeMasks(semanticLayers, semanticLayers.map((layer) => layer.id));
-    const baseCanvas = document.createElement("canvas");
-    baseCanvas.width = width;
-    baseCanvas.height = height;
-    const baseCtx = baseCanvas.getContext("2d")!;
-    baseCtx.drawImage(image, 0, 0, width, height);
-    if (allSceneMask) {
-      baseCtx.globalCompositeOperation = "destination-out";
-      baseCtx.drawImage(createMaskCanvas(allSceneMask), 0, 0, width, height);
+    const mergedMask = allSceneMask(semanticLayers);
+    const baseCanvas = mergedMask ? imageWithoutMask(image, mergedMask, width, height, cover) : document.createElement("canvas");
+    if (!mergedMask) {
+      baseCanvas.width = width;
+      baseCanvas.height = height;
+      const baseCtx = baseCanvas.getContext("2d")!;
+      if (cover) drawCover(baseCtx, image, image.naturalWidth, image.naturalHeight, width, height);
+      else baseCtx.drawImage(image, 0, 0, width, height);
     }
     drawTransformed(ctx, baseCanvas, animationFrame(timeline.baseAnimation, time, width, height), width, height);
     for (const layer of [...semanticLayers].reverse()) {
       const animation = timeline.sceneAnimations[layer.id] ?? STATIC_ANIMATION;
-      drawTransformed(ctx, maskedImage(image, layer, width, height), animationFrame(animation, time, width, height), width, height);
+      drawTransformed(ctx, maskedImage(image, layer, width, height, cover), animationFrame(animation, time, width, height), width, height);
     }
     const sceneSettled = animationFinished(timeline.baseAnimation, time)
       && semanticLayers.every((layer) => animationFinished(timeline.sceneAnimations[layer.id] ?? STATIC_ANIMATION, time));
-    if (sceneSettled) ctx.drawImage(image, 0, 0, width, height);
+    if (sceneSettled) {
+      if (cover) drawCover(ctx, image, image.naturalWidth, image.naturalHeight, width, height);
+      else ctx.drawImage(image, 0, 0, width, height);
+    }
   } else {
-    ctx.drawImage(image, 0, 0, width, height);
+    if (cover) drawCover(ctx, image, image.naturalWidth, image.naturalHeight, width, height);
+    else ctx.drawImage(image, 0, 0, width, height);
   }
 
   for (const textLayer of textLayers) {
@@ -136,13 +210,19 @@ export function renderPoster({
     typeCanvas.height = height;
     const typeCtx = typeCanvas.getContext("2d");
     if (!typeCtx) throw new Error("The browser could not allocate a text canvas.");
-    const sizePx = (textLayer.fontSize / 100) * height;
+    let sizePx = (textLayer.fontSize / 100) * height;
     const lines = textLayer.text.split("\n");
+    const x = (textLayer.xPosition / 100) * width;
+    typeCtx.font = `900 ${sizePx}px ${textLayer.font}`;
+    if (outputDimensions) {
+      const availableWidth = textLayer.alignment === "center" ? Math.min(x, width - x) * 2 : textLayer.alignment === "left" ? width - x : x;
+      const longestLine = Math.max(1, ...lines.map((line) => typeCtx.measureText(line).width));
+      sizePx *= Math.min(1, (availableWidth * 0.9) / longestLine);
+      typeCtx.font = `900 ${sizePx}px ${textLayer.font}`;
+    }
     const lineHeight = sizePx * (1 + textLayer.lineGap / 100);
     const totalHeight = Math.max(sizePx, (lines.length - 1) * lineHeight + sizePx);
     const startBaseline = (textLayer.yPosition / 100) * height - totalHeight / 2 + sizePx * 0.82;
-    const x = (textLayer.xPosition / 100) * width;
-    typeCtx.font = `900 ${sizePx}px ${textLayer.font}`;
     typeCtx.textAlign = textLayer.alignment;
     typeCtx.textBaseline = "alphabetic";
     typeCtx.lineJoin = "round";
@@ -175,7 +255,7 @@ export function renderPoster({
       typeCtx.imageSmoothingEnabled = true;
       for (const layer of frontLayers) {
         const animation = timeline?.sceneAnimations[layer.id] ?? STATIC_ANIMATION;
-        drawTransformed(typeCtx, createMaskCanvas(layer), animationFrame(animation, time, width, height), width, height, "destination-out");
+        drawTransformed(typeCtx, fittedMask(layer, width, height, cover), animationFrame(animation, time, width, height), width, height, "destination-out");
       }
     }
     drawTransformed(ctx, typeCanvas, animationFrame(textLayer.animation, time, width, height), width, height);
@@ -202,7 +282,8 @@ export function renderPoster({
       }
     }
     overlayCtx.putImageData(pixels, 0, 0);
-    ctx.drawImage(overlay, 0, 0, width, height);
+    if (cover) drawCover(ctx, overlay, reference.width, reference.height, width, height);
+    else ctx.drawImage(overlay, 0, 0, width, height);
   }
   return { width, height };
 }

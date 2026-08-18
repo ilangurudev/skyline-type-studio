@@ -1,19 +1,27 @@
-# Skyline Type Studio
+# Skyline Reel Studio
 
-Create cinematic, layered poster typography from any photograph. Skyline Type
-Studio segments a photo into semantic and depth-aware layers, then lets you put
-multiline text in front of or behind the layers you choose.
+Create cinematic, layered reels from any number of photographs. Skyline Reel
+Studio segments every scene into semantic and depth-aware layers, then lets you
+put multiline text in front of or behind the layers you choose.
+
+Add several photographs, reorder them, and edit every scene with the original
+Skyline Type Studio workflow. The full-reel player concatenates the scene
+timelines into a 9:16, 2:3 (4×6), 4:5, 1:1, or 16:9 canvas with optional crossfades. Upload
+an MP3 or other browser-decodable soundtrack, select the exact song section to
+use, and the studio detects a local beat grid. Global beat sync snaps scene boundaries and enabled base, depth, and text
+entrances to that grid without changing the source scene recipes.
 
 The animation timeline can begin on black or white and reveal the original
 photo, every detected depth plane, and every text layer independently. Each
 layer can fade, rise, drift, zoom, or use the motion-blurred Reel push with its
-own start time and duration. The one-click Modern Reel preset sequences the
-depth planes into a five-second parallax reveal. Play
-or scrub the sequence in the editor, then download a browser-rendered WebM at
-the photograph's source resolution. The still PNG export remains available.
+own start time and duration. New photos are analyzed sequentially as soon as
+they are added and receive the three-second Insta Edit preset by default. Play
+or scrub the sequence in the editor, then download either a single-scene WebM
+at the photograph's source resolution or a complete social-ready WebM with its
+soundtrack mixed into the recording. The still PNG export remains available.
 
-Everything runs locally in the browser. Photos are not uploaded to a server,
-and there is no account or sign-in.
+Everything runs locally in the browser. Photos and audio are not uploaded to a
+server, and there is no account or sign-in.
 
 ## Run locally
 
@@ -101,6 +109,9 @@ Pushes to `main` deploy it using `.github/workflows/deploy-pages.yml`.
   layers.
 - Canvas compositing renders the selected scene layers over or under the text.
 - A shared timeline animates scene masks and typography without uploading frames.
+- Local Web Audio analysis finds soundtrack onsets and estimates a beat grid.
+- A reel compositor crops every scene into one output format, aligns transitions,
+  and records the canvas plus soundtrack into one WebM.
 - The finished poster downloads as a full-resolution PNG.
 
 The browser loads quantized SegFormer and Depth Anything V2 models from Hugging

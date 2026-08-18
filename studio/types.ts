@@ -1,5 +1,5 @@
 export type TextAlign = "left" | "center" | "right";
-export type AnimationEffect = "fade" | "rise" | "drift" | "zoom" | "reel";
+export type AnimationEffect = "fade" | "rise" | "drift" | "zoom" | "reel" | "assemble";
 export type LayerAnimation = {
   enabled: boolean;
   effect: AnimationEffect;
@@ -43,6 +43,10 @@ export type SemanticLayer = BinaryMask & {
   color: [number, number, number];
   coverage: number;
   depthScore: number;
+  group?: string;
+  role?: "plane" | "object";
+  centroidX?: number;
+  centroidY?: number;
 };
 export type AnalysisQuality = "semantic" | "depth";
 export type MaskStatus = "idle" | "loading-model" | "analyzing" | "ready" | "error";
@@ -53,6 +57,7 @@ export type CachedAnalysis = {
   quality: AnalysisQuality;
   skyMask: SerializedMask | null;
   layers: SerializedSemanticLayer[];
+  objectLayers?: SerializedSemanticLayer[];
 };
 
 export type StudioRecipeV1 = {
@@ -118,7 +123,7 @@ export function createTextLayer(id: string, index: number, frontLayerIds: string
   return {
     id,
     name: `Text ${index}`,
-    text: index === 1 ? "ONE DESERT\nAFTER\nANOTHER" : "NEW TEXT",
+    text: index === 1 ? "" : "NEW TEXT",
     font: FONT_OPTIONS[0][1],
     fontSize: 15,
     lineGap: 18,
@@ -203,7 +208,7 @@ export function validateRecipe(value: unknown): asserts value is StudioRecipeV1 
 function validateAnimation(value: unknown, name: string): asserts value is LayerAnimation {
   if (!value || typeof value !== "object") throw new Error(`${name} must be an animation object.`);
   const animation = value as Partial<LayerAnimation>;
-  if (typeof animation.enabled !== "boolean" || !(["fade", "rise", "drift", "zoom", "reel"] as unknown[]).includes(animation.effect)) throw new Error(`${name} has invalid animation fields.`);
+  if (typeof animation.enabled !== "boolean" || !(["fade", "rise", "drift", "zoom", "reel", "assemble"] as unknown[]).includes(animation.effect)) throw new Error(`${name} has invalid animation fields.`);
   requireNumber(animation.delay, `${name}.delay`, 0, 60000);
   requireNumber(animation.duration, `${name}.duration`, 100, 60000);
 }

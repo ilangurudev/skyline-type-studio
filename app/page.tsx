@@ -1,10 +1,15 @@
 "use client";
 
+/* eslint-disable jsx-a11y/media-has-caption -- this editor handles user-provided music, not authored speech */
+
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createProjectArchive, deserializeAnalysis, readProjectArchive, serializeAnalysis, sha256File } from "@/studio/project";
 import { renderPoster } from "@/studio/render";
+import { renderReelFrame } from "@/studio/reel-render";
+import { buildReelTimeline, DEFAULT_REEL_SETTINGS, detectBeats, estimateTempo, selectSoundtrackBeats } from "@/studio/reel";
 import { createLayerAnimation, createTextLayer, createTimelineSettings, DEFAULT_TIMELINE_DURATION, FONT_OPTIONS } from "@/studio/types";
-import type { AnimationEffect, LayerAnimation, SkylineProjectV1, SourceFingerprint, TextAlign, TextLayer, TimelineSettings } from "@/studio/types";
+import type { ReelSettings } from "@/studio/reel";
+import type { AnalysisQuality, AnimationEffect, LayerAnimation, SkylineProjectV1, SourceFingerprint, TextAlign, TextLayer, TimelineSettings } from "@/studio/types";
 
 type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
 type BaseSemanticMask = BinaryMask & { label: string; sourceIndex: number; averageY: number };
@@ -15,6 +20,24 @@ type Segment = { label?: string; mask: { width: number; height: number; data: Ar
 type Segmenter = (input: HTMLCanvasElement) => Promise<Segment[]>;
 type DepthOutput = { predicted_depth?: { dims?: number[]; data?: ArrayLike<number> }; depth?: { width: number; height: number; data: ArrayLike<number> } };
 type DepthEstimator = (input: HTMLCanvasElement) => Promise<DepthOutput>;
+
+type ReelSceneRuntime = {
+  id: string;
+  image: HTMLImageElement;
+  imageName: string;
+  dimensions: string;
+  source: SourceFingerprint;
+  skyMask: BinaryMask | null;
+  semanticLayers: SemanticLayer[];
+  textLayers: TextLayer[];
+  activeTextLayerId: string;
+  timeline: TimelineSettings;
+  analysisQuality: AnalysisQuality | "idle";
+  maskStatus: MaskStatus;
+  maskError: string;
+};
+
+type ReelSceneSummary = Pick<ReelSceneRuntime, "id" | "imageName" | "dimensions" | "maskStatus"> & { duration: number };
 
 const MODEL_ID = "Xenova/segformer-b0-finetuned-ade-512-512";
 const DEPTH_MODEL_ID = "onnx-community/depth-anything-v2-small";
@@ -311,34 +334,137 @@ function createDepthStack(semanticLayers: SemanticLayer[], textLayers: TextLayer
   return stack;
 }
 
+function createInstaEditTimeline(layerIds: string[] = []): TimelineSettings {
+  const depthOrder = [...layerIds].reverse();
+  return {
+    duration: DEFAULT_TIMELINE_DURATION,
+    backgroundColor: "#000000",
+    baseAnimation: { enabled: true, effect: "reel", delay: 50, duration: 700 },
+    sceneAnimations: Object.fromEntries(depthOrder.map((id, index) => [id, {
+      enabled: true,
+      effect: index % 3 === 1 ? "drift" : "reel",
+      delay: 380 + index * Math.max(90, Math.min(170, 800 / Math.max(1, depthOrder.length))),
+      duration: 650,
+    }])),
+  };
+}
+
+function applyInstaEditTextAnimations(layers: TextLayer[]) {
+  return layers.map((layer, index) => ({
+    ...layer,
+    animation: { enabled: true, effect: "reel" as const, delay: 1500 + index * Math.min(110, 500 / Math.max(1, layers.length - 1)), duration: 600 },
+  }));
+}
+
+function formatTimestamp(milliseconds: number) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
+  const soundtrackInput = useRef<HTMLInputElement>(null);
+  const audioElement = useRef<HTMLAudioElement>(null);
+  const audioBufferRef = useRef<AudioBuffer | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const sourceFingerprintRef = useRef<SourceFingerprint | null>(null);
   const pendingProjectRef = useRef<SkylineProjectV1 | null>(null);
-  const analysisSequence = useRef(0);
+  const scenesRef = useRef<ReelSceneRuntime[]>([]);
+  const activeSceneIdRef = useRef<string | null>(null);
+  const analysisQueueRef = useRef(false);
+  const nextSceneId = useRef(1);
   const nextTextLayerId = useRef(2);
   const playbackFrame = useRef<number | null>(null);
-  const playbackStartedAt = useRef(0);
+  const reelPlaybackFrame = useRef<number | null>(null);
+  const [sceneList, setSceneList] = useState<ReelSceneSummary[]>([]);
+  const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [imageName, setImageName] = useState("");
   const [dimensions, setDimensions] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [maskStatus, setMaskStatus] = useState<MaskStatus>("idle");
+  const [analysisQueueRunning, setAnalysisQueueRunning] = useState(false);
   const [analysisQuality, setAnalysisQuality] = useState<"idle" | "semantic" | "depth">("idle");
   const [maskError, setMaskError] = useState("");
   const [skyMask, setSkyMask] = useState<BinaryMask | null>(null);
   const [semanticLayers, setSemanticLayers] = useState<SemanticLayer[]>([]);
-  const [textLayers, setTextLayers] = useState<TextLayer[]>(() => [createTextLayer("text-1", 1)]);
+  const [textLayers, setTextLayers] = useState<TextLayer[]>(() => applyInstaEditTextAnimations([createTextLayer("text-1", 1)]));
   const [activeTextLayerId, setActiveTextLayerId] = useState("text-1");
   const [draggedTextLayerId, setDraggedTextLayerId] = useState<string | null>(null);
   const [showMask, setShowMask] = useState(false);
-  const [timeline, setTimeline] = useState<TimelineSettings>(() => createTimelineSettings());
+  const [timeline, setTimeline] = useState<TimelineSettings>(() => createInstaEditTimeline());
   const [playhead, setPlayhead] = useState(DEFAULT_TIMELINE_DURATION);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [previewMode, setPreviewMode] = useState<"scene" | "reel">("scene");
+  const [reelSettings, setReelSettings] = useState<ReelSettings>(DEFAULT_REEL_SETTINGS);
+  const [reelPlayhead, setReelPlayhead] = useState(0);
+  const [isReelPlaying, setIsReelPlaying] = useState(false);
+  const [soundtrackName, setSoundtrackName] = useState("");
+  const [soundtrackUrl, setSoundtrackUrl] = useState("");
+  const [soundtrackDuration, setSoundtrackDuration] = useState(0);
+  const [soundtrackSectionStart, setSoundtrackSectionStart] = useState(0);
+  const [beatTimes, setBeatTimes] = useState<number[]>([]);
+  const [tempo, setTempo] = useState<number | null>(null);
   const [exportStatus, setExportStatus] = useState("");
   const activeTextLayer = textLayers.find((layer) => layer.id === activeTextLayerId) ?? textLayers[0];
+
+  const refreshSceneList = () => {
+    setSceneList(scenesRef.current.map((scene) => ({
+      id: scene.id,
+      imageName: scene.imageName,
+      dimensions: scene.dimensions,
+      maskStatus: scene.maskStatus,
+      duration: scene.timeline.duration,
+    })));
+  };
+
+  const captureActiveScene = () => {
+    const id = activeSceneIdRef.current;
+    if (!id || !imageRef.current || !sourceFingerprintRef.current) return;
+    const scene = scenesRef.current.find((candidate) => candidate.id === id);
+    if (!scene) return;
+    Object.assign(scene, {
+      image: imageRef.current,
+      imageName,
+      dimensions,
+      source: sourceFingerprintRef.current,
+      skyMask,
+      semanticLayers,
+      textLayers,
+      activeTextLayerId,
+      timeline,
+      analysisQuality,
+      maskStatus,
+      maskError,
+    });
+  };
+
+  const activateScene = (sceneId: string) => {
+    if (maskStatus === "loading-model" || maskStatus === "analyzing") return;
+    captureActiveScene();
+    refreshSceneList();
+    const scene = scenesRef.current.find((candidate) => candidate.id === sceneId);
+    if (!scene) return;
+    activeSceneIdRef.current = scene.id;
+    setActiveSceneId(scene.id);
+    imageRef.current = scene.image;
+    sourceFingerprintRef.current = scene.source;
+    setImageName(scene.imageName);
+    setDimensions(scene.dimensions);
+    setSkyMask(scene.skyMask);
+    setSemanticLayers(scene.semanticLayers);
+    setTextLayers(scene.textLayers);
+    setActiveTextLayerId(scene.activeTextLayerId);
+    setTimeline(scene.timeline);
+    setPlayhead(scene.timeline.duration);
+    setAnalysisQuality(scene.analysisQuality);
+    setMaskStatus(scene.maskStatus);
+    setMaskError(scene.maskError);
+    nextTextLayerId.current = Math.max(2, scene.textLayers.length + 1);
+    setPreviewMode("scene");
+  };
 
   const updateActiveTextLayer = (updates: Partial<TextLayer>) => {
     setTextLayers((current) => current.map((layer) => layer.id === activeTextLayerId ? { ...layer, ...updates } : layer));
@@ -365,13 +491,43 @@ export default function Home() {
     return renderPoster({ target, image, textLayers, semanticLayers, skyMask, activeTextLayerId, maskOverlay, maxDimension, time, timeline });
   }, [activeTextLayerId, semanticLayers, skyMask, textLayers, timeline]);
 
-  const analyzeImage = useCallback(async (image: HTMLImageElement) => {
-    const sequence = ++analysisSequence.current;
-    setSkyMask(null);
-    setSemanticLayers([]);
-    setAnalysisQuality("idle");
-    setMaskError("");
-    setMaskStatus("loading-model");
+  const baseReelDuration = sceneList.reduce((sum, scene) => sum + (scene.id === activeSceneId ? timeline.duration : scene.duration), 0);
+  const soundtrackWindowDuration = Math.max(DEFAULT_TIMELINE_DURATION, baseReelDuration);
+  const soundtrackMaxStart = Math.max(0, soundtrackDuration - soundtrackWindowDuration);
+  const soundtrackStart = Math.min(soundtrackSectionStart, soundtrackMaxStart);
+  const soundtrackBeatTimes = selectSoundtrackBeats(beatTimes, soundtrackStart);
+  const reelSchedule = buildReelTimeline(sceneList.map((scene) => ({ id: scene.id, duration: scene.id === activeSceneId ? timeline.duration : scene.duration })), soundtrackBeatTimes, reelSettings.beatSync);
+  const soundtrackSectionDuration = Math.max(DEFAULT_TIMELINE_DURATION, reelSchedule.duration);
+  const soundtrackSectionEnd = Math.min(soundtrackDuration, soundtrackStart + soundtrackSectionDuration);
+  const soundtrackSectionBeatCount = soundtrackBeatTimes.filter((beat) => beat <= soundtrackSectionDuration).length;
+
+  const drawReel = useCallback((target: HTMLCanvasElement, time: number, maxDimension?: number) => {
+    const scenes = scenesRef.current.map((scene) => scene.id === activeSceneId ? {
+      ...scene,
+      image: imageRef.current ?? scene.image,
+      skyMask,
+      semanticLayers,
+      textLayers,
+      timeline,
+    } : scene);
+    return renderReelFrame({ target, scenes, settings: reelSettings, beatTimes: soundtrackBeatTimes, time, maxDimension });
+  }, [activeSceneId, reelSettings, semanticLayers, skyMask, soundtrackBeatTimes, textLayers, timeline]);
+
+  const analyzeScene = async (scene: ReelSceneRuntime) => {
+    const isActive = () => activeSceneIdRef.current === scene.id;
+    scene.skyMask = null;
+    scene.semanticLayers = [];
+    scene.analysisQuality = "idle";
+    scene.maskError = "";
+    scene.maskStatus = "loading-model";
+    refreshSceneList();
+    if (isActive()) {
+      setSkyMask(null);
+      setSemanticLayers([]);
+      setAnalysisQuality("idle");
+      setMaskError("");
+      setMaskStatus("loading-model");
+    }
     try {
       const [segmenter, depthEstimator] = await Promise.all([
         getSegmenter(),
@@ -381,23 +537,22 @@ export default function Home() {
           return null;
         }),
       ]);
-      if (sequence !== analysisSequence.current) return;
-      setMaskStatus("analyzing");
-      const scale = Math.min(1, 1024 / Math.max(image.naturalWidth, image.naturalHeight));
+      scene.maskStatus = "analyzing";
+      refreshSceneList();
+      if (isActive()) setMaskStatus("analyzing");
+      const scale = Math.min(1, 1024 / Math.max(scene.image.naturalWidth, scene.image.naturalHeight));
       const analysis = document.createElement("canvas");
-      analysis.width = Math.max(1, Math.round(image.naturalWidth * scale));
-      analysis.height = Math.max(1, Math.round(image.naturalHeight * scale));
-      analysis.getContext("2d")!.drawImage(image, 0, 0, analysis.width, analysis.height);
+      analysis.width = Math.max(1, Math.round(scene.image.naturalWidth * scale));
+      analysis.height = Math.max(1, Math.round(scene.image.naturalHeight * scale));
+      analysis.getContext("2d")!.drawImage(scene.image, 0, 0, analysis.width, analysis.height);
       const segments = await segmenter(analysis);
-      if (sequence !== analysisSequence.current) return;
       const depthOutput = depthEstimator ? await depthEstimator(analysis).catch((error) => {
         console.warn("Depth analysis failed; continuing with semantic layers.", error);
         return null;
       }) : null;
-      if (sequence !== analysisSequence.current) return;
       const sky = segments.find((segment) => segment.label?.toLowerCase() === "sky");
       const cleanSky = sky ? cleanSkyMask(sky.mask.data, sky.mask.width, sky.mask.height) : null;
-      if (sky && cleanSky) setSkyMask({ width: sky.mask.width, height: sky.mask.height, data: cleanSky });
+      const nextSkyMask = sky && cleanSky ? { width: sky.mask.width, height: sky.mask.height, data: cleanSky } : null;
 
       const baseMasks = segments
         .filter((segment) => segment.label?.toLowerCase() !== "sky")
@@ -430,23 +585,58 @@ export default function Home() {
       const depthMap = resizeDepthMap(depthOutput, groupedMasks[0].width, groupedMasks[0].height);
       const { layers, depthEnhanced } = createDepthLayers(groupedMasks, depthMap);
       if (!layers.length) throw new Error("No distinct depth layers were detected in this photograph.");
-      setSemanticLayers(layers);
-      setTextLayers((current) => current.map((textLayer) => ({ ...textLayer, frontLayerIds: layers.map((layer) => layer.id) })));
-      setTimeline((current) => {
-        const sequenced = createTimelineSettings(layers.map((layer) => layer.id)).sceneAnimations;
-        return {
-          ...current,
-          sceneAnimations: Object.fromEntries(layers.map((layer) => [layer.id, current.sceneAnimations[layer.id] ?? sequenced[layer.id]])),
-        };
-      });
-      setAnalysisQuality(depthEnhanced ? "depth" : "semantic");
-      setMaskStatus("ready");
+      const layerIds = layers.map((layer) => layer.id);
+      scene.skyMask = nextSkyMask;
+      scene.semanticLayers = layers;
+      scene.textLayers = applyInstaEditTextAnimations(scene.textLayers.map((textLayer) => ({ ...textLayer, frontLayerIds: layerIds })));
+      scene.timeline = createInstaEditTimeline(layerIds);
+      scene.analysisQuality = depthEnhanced ? "depth" : "semantic";
+      scene.maskStatus = "ready";
+      scene.maskError = "";
+      refreshSceneList();
+      if (isActive()) {
+        setSkyMask(scene.skyMask);
+        setSemanticLayers(scene.semanticLayers);
+        setTextLayers(scene.textLayers);
+        setTimeline(scene.timeline);
+        setAnalysisQuality(scene.analysisQuality);
+        setMaskStatus("ready");
+        setMaskError("");
+      }
+      return true;
     } catch (error) {
       console.error(error);
-      setMaskError(error instanceof Error ? error.message : "The vision models could not run in this browser.");
-      setMaskStatus("error");
+      scene.maskError = error instanceof Error ? error.message : "The vision models could not run in this browser.";
+      scene.maskStatus = "error";
+      refreshSceneList();
+      if (isActive()) {
+        setMaskError(scene.maskError);
+        setMaskStatus("error");
+      }
+      return false;
     }
-  }, []);
+  };
+
+  const analyzeScenesSequentially = async (scenes: ReelSceneRuntime[]) => {
+    if (analysisQueueRef.current) return;
+    const pending = scenes.filter((scene) => scene.maskStatus === "idle");
+    if (!pending.length) return;
+    analysisQueueRef.current = true;
+    setAnalysisQueueRunning(true);
+    let completed = 0;
+    let failed = 0;
+    try {
+      for (const [index, scene] of pending.entries()) {
+        setExportStatus(`Analyzing photo ${index + 1} of ${pending.length}: ${scene.imageName}`);
+        if (await analyzeScene(scene)) completed += 1;
+        else failed += 1;
+      }
+      setExportStatus(failed ? `${completed} photo${completed === 1 ? "" : "s"} analyzed · ${failed} could not be segmented.` : `${completed} photo${completed === 1 ? "" : "s"} analyzed — reel layers are ready.`);
+    } finally {
+      analysisQueueRef.current = false;
+      setAnalysisQueueRunning(false);
+    }
+  };
 
   const depthStack = createDepthStack(semanticLayers, textLayers);
 
@@ -483,23 +673,41 @@ export default function Home() {
     moveTextLayerToDepthIndex(textLayerId, direction < 0 ? currentIndex - 1 : currentIndex + 2);
   };
 
-  useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask, undefined, playhead); }, [drawPoster, showMask, playhead]);
+  useEffect(() => {
+    const id = activeSceneIdRef.current;
+    const scene = scenesRef.current.find((candidate) => candidate.id === id);
+    if (!scene || !imageRef.current || !sourceFingerprintRef.current) return;
+    Object.assign(scene, { image: imageRef.current, source: sourceFingerprintRef.current, imageName, dimensions, skyMask, semanticLayers, textLayers, activeTextLayerId, timeline, analysisQuality, maskStatus, maskError });
+  }, [activeTextLayerId, analysisQuality, dimensions, imageName, maskError, maskStatus, semanticLayers, skyMask, textLayers, timeline]);
 
-  useEffect(() => () => { if (playbackFrame.current !== null) cancelAnimationFrame(playbackFrame.current); }, []);
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    if (previewMode === "reel") drawReel(canvasRef.current, reelPlayhead, 900);
+    else drawPoster(canvasRef.current, showMask, undefined, playhead);
+  }, [drawPoster, drawReel, playhead, previewMode, reelPlayhead, showMask]);
 
-  const stopPlayback = useCallback(() => {
+  useEffect(() => () => {
+    if (playbackFrame.current !== null) cancelAnimationFrame(playbackFrame.current);
+    if (reelPlaybackFrame.current !== null) cancelAnimationFrame(reelPlaybackFrame.current);
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+  }, []);
+
+  const stopPlayback = () => {
     if (playbackFrame.current !== null) cancelAnimationFrame(playbackFrame.current);
     playbackFrame.current = null;
     setIsPlaying(false);
-  }, []);
+  };
 
   const play = () => {
+    stopReelPlayback();
+    setPreviewMode("scene");
     stopPlayback();
     const startAt = playhead >= timeline.duration ? 0 : playhead;
-    playbackStartedAt.current = performance.now() - startAt;
     setIsPlaying(true);
+    let startedAt: number | null = null;
     const tick = (now: number) => {
-      const next = Math.min(timeline.duration, now - playbackStartedAt.current);
+      if (startedAt === null) startedAt = now - startAt;
+      const next = Math.min(timeline.duration, now - startedAt);
       setPlayhead(next);
       if (next < timeline.duration) playbackFrame.current = requestAnimationFrame(tick);
       else stopPlayback();
@@ -507,48 +715,62 @@ export default function Home() {
     playbackFrame.current = requestAnimationFrame(tick);
   };
 
-  const applyModernReel = () => {
+  const stopReelPlayback = () => {
+    if (reelPlaybackFrame.current !== null) cancelAnimationFrame(reelPlaybackFrame.current);
+    reelPlaybackFrame.current = null;
+    audioElement.current?.pause();
+    setIsReelPlaying(false);
+  };
+
+  const playReel = () => {
+    if (!sceneList.length || reelSchedule.duration <= 0) return;
     stopPlayback();
-    const duration = 5000;
-    const depthOrder = [...semanticLayers].reverse();
-    setTimeline({
-      duration,
-      backgroundColor: "#000000",
-      baseAnimation: { enabled: true, effect: "reel", delay: 80, duration: 1150 },
-      sceneAnimations: Object.fromEntries(depthOrder.map((layer, index) => [layer.id, {
-        enabled: true,
-        effect: index % 3 === 1 ? "drift" : "reel",
-        delay: 620 + index * Math.max(150, Math.min(280, 1250 / Math.max(1, depthOrder.length))),
-        duration: 1050,
-      }])),
-    });
-    setTextLayers((current) => current.map((layer, index) => ({
-      ...layer,
-      animation: { enabled: true, effect: "reel", delay: 2550 + index * 180, duration: 900 },
-    })));
+    stopReelPlayback();
+    setPreviewMode("reel");
+    const startAt = reelPlayhead >= reelSchedule.duration ? 0 : reelPlayhead;
+    if (audioElement.current && soundtrackName) {
+      audioElement.current.currentTime = Math.min((soundtrackStart + startAt) / 1000, audioElement.current.duration || 0);
+      void audioElement.current.play().catch(() => setExportStatus("Press Play again to allow soundtrack playback."));
+    }
+    setIsReelPlaying(true);
+    let startedAt: number | null = null;
+    const tick = (now: number) => {
+      if (startedAt === null) startedAt = now - startAt;
+      const next = Math.min(reelSchedule.duration, now - startedAt);
+      setReelPlayhead(next);
+      if (next < reelSchedule.duration) reelPlaybackFrame.current = requestAnimationFrame(tick);
+      else stopReelPlayback();
+    };
+    reelPlaybackFrame.current = requestAnimationFrame(tick);
+  };
+
+  const applyInstaEdit = () => {
+    stopPlayback();
+    setTimeline(createInstaEditTimeline(semanticLayers.map((layer) => layer.id)));
+    setTextLayers(applyInstaEditTextAnimations);
     setPlayhead(0);
-    setExportStatus("Modern Reel applied — press Play to preview");
+    setExportStatus("Insta Edit applied — press Play to preview");
   };
 
   const applySlowCinema = () => {
     stopPlayback();
-    const duration = 8000;
+    const duration = DEFAULT_TIMELINE_DURATION;
     const depthOrder = [...semanticLayers].reverse();
-    const gap = Math.max(240, Math.min(520, 1800 / Math.max(1, depthOrder.length)));
+    const gap = Math.max(90, Math.min(170, 850 / Math.max(1, depthOrder.length)));
     setTimeline({
       duration,
       backgroundColor: "#000000",
-      baseAnimation: { enabled: true, effect: "zoom", delay: 180, duration: 2100 },
+      baseAnimation: { enabled: true, effect: "zoom", delay: 70, duration: 800 },
       sceneAnimations: Object.fromEntries(depthOrder.map((layer, index) => [layer.id, {
         enabled: true,
         effect: index % 2 === 0 ? "fade" : "drift",
-        delay: 1250 + index * gap,
-        duration: 1800,
+        delay: 500 + index * gap,
+        duration: 700,
       }])),
     });
     setTextLayers((current) => current.map((layer, index) => ({
       ...layer,
-      animation: { enabled: true, effect: "fade", delay: 4300 + index * 360, duration: 1700 },
+      animation: { enabled: true, effect: "fade", delay: 1700 + index * Math.min(100, 400 / Math.max(1, current.length - 1)), duration: 700 },
     })));
     setPlayhead(0);
     setExportStatus("Slow Cinema applied — press Play to preview");
@@ -556,7 +778,7 @@ export default function Home() {
 
   const applyEditorialFlash = () => {
     stopPlayback();
-    const duration = 3000;
+    const duration = DEFAULT_TIMELINE_DURATION;
     const depthOrder = [...semanticLayers].reverse();
     const gap = Math.max(90, Math.min(180, 620 / Math.max(1, depthOrder.length)));
     setTimeline({
@@ -583,59 +805,85 @@ export default function Home() {
     setExportStatus("Editorial Flash applied — press Play to preview");
   };
 
-  const loadFile = async (file?: File) => {
-    if (!file || !file.type.startsWith("image/")) return;
-    const pendingProject = pendingProjectRef.current;
-    setMaskError("");
-    let sha256: string;
-    try {
-      sha256 = await sha256File(file);
-    } catch {
-      setMaskError("The browser could not fingerprint this photograph.");
-      setMaskStatus("error");
-      return;
-    }
-    if (pendingProject && sha256 !== pendingProject.source.sha256) {
-      setMaskError(`This project expects ${pendingProject.source.name}. Choose the original matching photograph.`);
-      setMaskStatus("error");
-      return;
-    }
+  const decodeImage = (file: File) => new Promise<HTMLImageElement>((resolve, reject) => {
     const objectUrl = URL.createObjectURL(file);
     const image = new Image();
-    image.onload = () => {
-      if (pendingProject && (image.naturalWidth !== pendingProject.source.width || image.naturalHeight !== pendingProject.source.height)) {
-        URL.revokeObjectURL(objectUrl);
-        setMaskError("The selected photograph dimensions do not match this project.");
-        setMaskStatus("error");
-        return;
-      }
-      imageRef.current = image;
-      setImageName(file.name);
-      setDimensions(`${image.naturalWidth.toLocaleString()} × ${image.naturalHeight.toLocaleString()}`);
-      sourceFingerprintRef.current = { name: file.name, size: file.size, width: image.naturalWidth, height: image.naturalHeight, sha256 };
-      URL.revokeObjectURL(objectUrl);
-      if (pendingProject) {
-        const restored = deserializeAnalysis(pendingProject.analysis);
-        setSkyMask(restored.skyMask);
-        setSemanticLayers(restored.layers);
-        setAnalysisQuality(restored.quality);
-        setTextLayers(pendingProject.recipe.textLayers);
-        const restoredTimeline = pendingProject.recipe.timeline ?? createTimelineSettings(restored.layers.map((layer) => layer.id));
-        setTimeline(restoredTimeline);
-        setPlayhead(restoredTimeline.duration);
-        setActiveTextLayerId(pendingProject.recipe.activeTextLayerId);
-        nextTextLayerId.current = Math.max(2, pendingProject.recipe.textLayers.length + 1);
-        setMaskStatus("ready");
-        pendingProjectRef.current = null;
-      } else {
-        void analyzeImage(image);
-      }
-    };
-    image.onerror = () => { URL.revokeObjectURL(objectUrl); setMaskError("That image could not be opened."); setMaskStatus("error"); };
+    image.onload = () => { URL.revokeObjectURL(objectUrl); resolve(image); };
+    image.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error(`${file.name} could not be opened.`)); };
     image.src = objectUrl;
+  });
+
+  const loadFiles = async (files: File[]) => {
+    if (analysisQueueRef.current || maskStatus === "loading-model" || maskStatus === "analyzing") return;
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (!images.length) return;
+    const pendingProject = pendingProjectRef.current;
+    setMaskError("");
+    setExportStatus(`Preparing ${images.length} photograph${images.length === 1 ? "" : "s"}…`);
+    try {
+      const added: ReelSceneRuntime[] = [];
+      for (const [index, file] of images.entries()) {
+        const sha256 = await sha256File(file);
+        if (pendingProject && index === 0 && sha256 !== pendingProject.source.sha256) {
+          throw new Error(`This project expects ${pendingProject.source.name}. Choose the original matching photograph.`);
+        }
+        const image = await decodeImage(file);
+        if (pendingProject && index === 0 && (image.naturalWidth !== pendingProject.source.width || image.naturalHeight !== pendingProject.source.height)) {
+          throw new Error("The selected photograph dimensions do not match this project.");
+        }
+        const source = { name: file.name, size: file.size, width: image.naturalWidth, height: image.naturalHeight, sha256 };
+        const dimensionsLabel = `${image.naturalWidth.toLocaleString()} × ${image.naturalHeight.toLocaleString()}`;
+        const defaultText = applyInstaEditTextAnimations([createTextLayer("text-1", 1)]);
+        const scene: ReelSceneRuntime = {
+          id: `scene-${nextSceneId.current++}`,
+          image,
+          imageName: file.name,
+          dimensions: dimensionsLabel,
+          source,
+          skyMask: null,
+          semanticLayers: [],
+          textLayers: defaultText,
+          activeTextLayerId: defaultText[0].id,
+          timeline: createInstaEditTimeline(),
+          analysisQuality: "idle",
+          maskStatus: "idle",
+          maskError: "",
+        };
+        if (pendingProject && index === 0) {
+          const restored = deserializeAnalysis(pendingProject.analysis);
+          scene.skyMask = restored.skyMask;
+          scene.semanticLayers = restored.layers;
+          scene.analysisQuality = restored.quality;
+          scene.textLayers = pendingProject.recipe.textLayers;
+          scene.activeTextLayerId = pendingProject.recipe.activeTextLayerId;
+          scene.timeline = pendingProject.recipe.timeline ?? createTimelineSettings(restored.layers.map((layer) => layer.id));
+          scene.maskStatus = "ready";
+        }
+        added.push(scene);
+      }
+      captureActiveScene();
+      scenesRef.current = [...scenesRef.current, ...added];
+      pendingProjectRef.current = null;
+      refreshSceneList();
+      activateScene(added[0].id);
+      setExportStatus(`${added.length} scene${added.length === 1 ? "" : "s"} added — beginning automatic analysis.`);
+      await analyzeScenesSequentially(added);
+    } catch (error) {
+      pendingProjectRef.current = null;
+      setMaskError(error instanceof Error ? error.message : "The photographs could not be prepared.");
+      setMaskStatus("error");
+    }
   };
-  const handleFile = (event: ChangeEvent<HTMLInputElement>) => { void loadFile(event.target.files?.[0]); };
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => { event.preventDefault(); setIsDragging(false); void loadFile(event.dataTransfer.files?.[0]); };
+  const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = [...(event.target.files ?? [])];
+    event.target.value = "";
+    void loadFiles(files);
+  };
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+    void loadFiles([...event.dataTransfer.files]);
+  };
   const handleProject = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -650,6 +898,118 @@ export default function Home() {
       setMaskStatus("error");
     }
   };
+
+  const moveScene = (sceneId: string, direction: -1 | 1) => {
+    captureActiveScene();
+    const currentIndex = scenesRef.current.findIndex((scene) => scene.id === sceneId);
+    const targetIndex = currentIndex + direction;
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= scenesRef.current.length) return;
+    const next = [...scenesRef.current];
+    [next[currentIndex], next[targetIndex]] = [next[targetIndex], next[currentIndex]];
+    scenesRef.current = next;
+    refreshSceneList();
+  };
+
+  const removeScene = (sceneId: string) => {
+    if (maskStatus === "loading-model" || maskStatus === "analyzing") return;
+    captureActiveScene();
+    const currentIndex = scenesRef.current.findIndex((scene) => scene.id === sceneId);
+    scenesRef.current = scenesRef.current.filter((scene) => scene.id !== sceneId);
+    refreshSceneList();
+    if (sceneId !== activeSceneIdRef.current) return;
+    const next = scenesRef.current[Math.min(currentIndex, scenesRef.current.length - 1)];
+    activeSceneIdRef.current = next?.id ?? null;
+    setActiveSceneId(next?.id ?? null);
+    if (next) {
+      imageRef.current = next.image;
+      sourceFingerprintRef.current = next.source;
+      setImageName(next.imageName);
+      setDimensions(next.dimensions);
+      setSkyMask(next.skyMask);
+      setSemanticLayers(next.semanticLayers);
+      setTextLayers(next.textLayers);
+      setActiveTextLayerId(next.activeTextLayerId);
+      setTimeline(next.timeline);
+      setPlayhead(next.timeline.duration);
+      setAnalysisQuality(next.analysisQuality);
+      setMaskStatus(next.maskStatus);
+      setMaskError(next.maskError);
+      if (next.maskStatus === "idle") void analyzeScenesSequentially([next]);
+    } else {
+      imageRef.current = null;
+      sourceFingerprintRef.current = null;
+      setImageName("");
+      setDimensions("");
+      setSkyMask(null);
+      setSemanticLayers([]);
+      const emptyText = applyInstaEditTextAnimations([createTextLayer("text-1", 1)]);
+      setTextLayers(emptyText);
+      setActiveTextLayerId(emptyText[0].id);
+      setTimeline(createInstaEditTimeline());
+      setPlayhead(DEFAULT_TIMELINE_DURATION);
+      setAnalysisQuality("idle");
+      setMaskStatus("idle");
+      setMaskError("");
+      setPreviewMode("scene");
+    }
+  };
+
+  const handleSoundtrack = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      setExportStatus("Analyzing soundtrack beats locally…");
+      const context = new AudioContext();
+      const buffer = await context.decodeAudioData(await file.arrayBuffer());
+      const mono = new Float32Array(buffer.length);
+      for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+        const data = buffer.getChannelData(channel);
+        for (let index = 0; index < data.length; index += 1) mono[index] += data[index] / buffer.numberOfChannels;
+      }
+      const detected = detectBeats(mono, buffer.sampleRate);
+      audioBufferRef.current = buffer;
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+      const url = URL.createObjectURL(file);
+      audioUrlRef.current = url;
+      setSoundtrackUrl(url);
+      setSoundtrackName(file.name);
+      setSoundtrackDuration(buffer.duration * 1000);
+      setSoundtrackSectionStart(0);
+      setBeatTimes(detected);
+      setTempo(estimateTempo(detected));
+      setReelSettings((current) => ({ ...current, beatSync: detected.length > 1 }));
+      await context.close();
+      setExportStatus(detected.length > 1 ? `${detected.length} beats detected — beat sync enabled.` : "Soundtrack loaded; no reliable beat grid was detected.");
+    } catch (error) {
+      audioBufferRef.current = null;
+      setBeatTimes([]);
+      setTempo(null);
+      setExportStatus(error instanceof Error ? error.message : "The soundtrack could not be decoded.");
+    }
+  };
+
+  const clearSoundtrack = () => {
+    stopReelPlayback();
+    audioBufferRef.current = null;
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioUrlRef.current = null;
+    setSoundtrackUrl("");
+    setSoundtrackName("");
+    setSoundtrackDuration(0);
+    setSoundtrackSectionStart(0);
+    setBeatTimes([]);
+    setTempo(null);
+    setReelSettings((current) => ({ ...current, beatSync: false }));
+  };
+
+  const chooseSoundtrackSection = (start: number) => {
+    stopReelPlayback();
+    const clamped = Math.max(0, Math.min(soundtrackMaxStart, start));
+    setSoundtrackSectionStart(clamped);
+    if (audioElement.current) audioElement.current.currentTime = clamped / 1000;
+  };
+
   const triggerDownload = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -713,31 +1073,134 @@ export default function Home() {
     setExportStatus("WebM saved at source resolution");
   };
 
+  const downloadReel = async () => {
+    if (!scenesRef.current.length || typeof MediaRecorder === "undefined") return;
+    captureActiveScene();
+    stopPlayback();
+    stopReelPlayback();
+    setPreviewMode("reel");
+    setExportStatus("Rendering reel in real time… 0%");
+    const exportCanvas = document.createElement("canvas");
+    const initial = drawReel(exportCanvas, 0);
+    if (!initial || initial.duration <= 0) return;
+    const videoStream = exportCanvas.captureStream(30);
+    let audioContext: AudioContext | null = null;
+    let audioSource: AudioBufferSourceNode | null = null;
+    let stream: MediaStream = videoStream;
+    if (audioBufferRef.current) {
+      audioContext = new AudioContext();
+      const destination = audioContext.createMediaStreamDestination();
+      audioSource = audioContext.createBufferSource();
+      audioSource.buffer = audioBufferRef.current;
+      audioSource.connect(destination);
+      stream = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
+      await audioContext.resume();
+    }
+    const mimeType = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm;codecs=vp9",
+      "video/webm",
+    ].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 16_000_000, audioBitsPerSecond: 192_000 } : undefined);
+    const finished = new Promise<Blob>((resolve, reject) => {
+      recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+      recorder.onerror = () => reject(new Error("The browser could not record this reel."));
+      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+    });
+    recorder.start(1000);
+    const soundtrackOffset = soundtrackStart / 1000;
+    const soundtrackAvailable = Math.max(0, (audioBufferRef.current?.duration ?? initial.duration / 1000) - soundtrackOffset);
+    audioSource?.start(0, soundtrackOffset, Math.min(initial.duration / 1000, soundtrackAvailable));
+    const started = performance.now();
+    let lastProgress = -1;
+    await new Promise<void>((resolve) => {
+      const renderFrame = (now: number) => {
+        const time = Math.min(initial.duration, now - started);
+        drawReel(exportCanvas, time);
+        setReelPlayhead(time);
+        const progress = Math.floor((time / initial.duration) * 100);
+        if (progress >= lastProgress + 5) {
+          lastProgress = progress;
+          setExportStatus(`Rendering reel in real time… ${progress}%`);
+        }
+        if (time < initial.duration) reelPlaybackFrame.current = requestAnimationFrame(renderFrame);
+        else setTimeout(() => { recorder.stop(); resolve(); }, 120);
+      };
+      reelPlaybackFrame.current = requestAnimationFrame(renderFrame);
+    });
+    reelPlaybackFrame.current = null;
+    const blob = await finished;
+    try { audioSource?.stop(); } catch { /* source may already have ended */ }
+    await audioContext?.close();
+    triggerDownload(blob, "skyline-reel.webm");
+    setExportStatus(`Reel saved · ${(initial.duration / 1000).toFixed(1)}s · ${initial.width} × ${initial.height}${audioBufferRef.current ? " · soundtrack included" : ""}`);
+  };
+
   const updateSceneAnimation = (layerId: string, updates: Partial<LayerAnimation>) => {
     setTimeline((current) => ({ ...current, sceneAnimations: { ...current.sceneAnimations, [layerId]: { ...(current.sceneAnimations[layerId] ?? createLayerAnimation()), ...updates } } }));
   };
 
-  const busy = maskStatus === "loading-model" || maskStatus === "analyzing";
+  const busy = analysisQueueRunning || maskStatus === "loading-model" || maskStatus === "analyzing";
+  const reelReady = sceneList.length > 0 && sceneList.every((scene) => (scene.id === activeSceneId ? maskStatus : scene.maskStatus) === "ready");
   const statusText = maskStatus === "loading-model" ? "Loading segmentation + depth…" : maskStatus === "analyzing" ? "Tracing depth planes…" : maskStatus === "ready" ? `${semanticLayers.length} depth layer${semanticLayers.length === 1 ? "" : "s"} ready` : maskStatus === "error" ? "Layers unavailable" : "Waiting for image";
 
   return <main className="studio-shell">
-    <header className="masthead"><div><p className="eyebrow">Browser-based poster maker</p><h1>Skyline Type Studio</h1></div><p className="privacy-note">Models download once. Your photograph stays in this browser.</p></header>
+    <header className="masthead"><div><p className="eyebrow">Browser-based reel maker</p><h1>Skyline Reel Studio</h1></div><p className="privacy-note">Photos and soundtracks stay in this browser. Only model files are fetched.</p></header>
     <section className="workspace">
       <aside className="control-panel" aria-label="Poster controls">
         <section className="control-section">
-          <div className="panel-heading"><span className="step">01</span><div><p className="label">Source image</p><p className="hint">Mountains, coasts, cities, and trees all work.</p></div></div>
-          <button className="upload-button" onClick={() => fileInput.current?.click()}>{imageName ? "Replace photograph" : "Choose a photograph"}</button>
-          <input ref={fileInput} type="file" accept="image/*" hidden onChange={handleFile} />
+          <div className="panel-heading"><span className="step">01</span><div><p className="label">Reel scenes</p><p className="hint">Add any number of photographs; depth analysis runs through them one by one.</p></div></div>
+          <button className="upload-button" onClick={() => fileInput.current?.click()}>＋ Add photographs</button>
+          <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={handleFile} />
+          {sceneList.length > 0 && <div className="scene-list" aria-label="Reel scenes">
+            {sceneList.map((scene, index) => <div className={`scene-card ${scene.id === activeSceneId ? "active" : ""}`} key={scene.id}>
+              <button type="button" className="scene-select" onClick={() => activateScene(scene.id)} disabled={busy} aria-pressed={scene.id === activeSceneId}>
+                <span>{String(index + 1).padStart(2, "0")}</span><b>{scene.imageName}</b><small>{((scene.id === activeSceneId ? timeline.duration : scene.duration) / 1000).toFixed(1)}s · {(scene.id === activeSceneId ? maskStatus : scene.maskStatus) === "ready" ? "layers ready" : (scene.id === activeSceneId ? maskStatus : scene.maskStatus) === "idle" ? "queued for analysis" : (scene.id === activeSceneId ? maskStatus : scene.maskStatus) === "loading-model" ? "loading models" : (scene.id === activeSceneId ? maskStatus : scene.maskStatus) === "analyzing" ? "analyzing layers" : "analysis failed"}</small>
+              </button>
+              <div className="scene-actions">
+                <button type="button" onClick={() => moveScene(scene.id, -1)} disabled={index === 0 || busy} aria-label={`Move ${scene.imageName} earlier`}>↑</button>
+                <button type="button" onClick={() => moveScene(scene.id, 1)} disabled={index === sceneList.length - 1 || busy} aria-label={`Move ${scene.imageName} later`}>↓</button>
+                <button type="button" onClick={() => removeScene(scene.id)} disabled={busy} aria-label={`Remove ${scene.imageName}`}>×</button>
+              </div>
+            </div>)}
+          </div>}
+          <div className="reel-global-controls">
+            <label><span>Reel frame</span><select value={reelSettings.aspect} onChange={(event) => setReelSettings((current) => ({ ...current, aspect: event.target.value as ReelSettings["aspect"] }))}><option value="9:16">Vertical · 9:16</option><option value="2:3">Photo · 2:3 (4×6)</option><option value="4:5">Portrait · 4:5</option><option value="1:1">Square · 1:1</option><option value="16:9">Landscape · 16:9</option></select></label>
+            <label><span>Between scenes</span><select value={reelSettings.transition} onChange={(event) => setReelSettings((current) => ({ ...current, transition: event.target.value as ReelSettings["transition"] }))}><option value="crossfade">Crossfade</option><option value="cut">Hard cut</option></select></label>
+          </div>
+          <div className="soundtrack-card">
+            <div><b>Soundtrack</b><small>{soundtrackName ? `${soundtrackName} · ${(soundtrackDuration / 1000).toFixed(1)}s${tempo ? ` · ~${tempo} BPM` : ""}` : "Optional MP3, WAV, M4A, or browser-decodable audio"}</small></div>
+            <button type="button" onClick={() => soundtrackInput.current?.click()}>{soundtrackName ? "Replace" : "Upload audio"}</button>
+            {soundtrackName && <button type="button" onClick={clearSoundtrack} aria-label="Remove soundtrack">Remove</button>}
+            <input ref={soundtrackInput} type="file" accept="audio/*,.mp3" hidden onChange={handleSoundtrack} />
+          </div>
+          {soundtrackUrl && <div className="soundtrack-section-selector">
+            <div><b>Select soundtrack section</b><output>{formatTimestamp(soundtrackStart)}–{formatTimestamp(soundtrackSectionEnd)}</output></div>
+            <input aria-label="Soundtrack section start" type="range" min={0} max={Math.max(1, soundtrackMaxStart)} step={100} value={soundtrackStart} disabled={soundtrackMaxStart <= 0} onChange={(event) => chooseSoundtrackSection(Number(event.target.value))} />
+            <p><span>Track start</span><span>Selected window follows the reel length</span><span>{formatTimestamp(soundtrackDuration)}</span></p>
+          </div>}
+          {soundtrackUrl && <audio ref={audioElement} className="soundtrack-player" src={soundtrackUrl} preload="auto" controls onPlay={(event) => { const current = event.currentTarget.currentTime * 1000; if (current < soundtrackStart || current >= soundtrackSectionEnd) event.currentTarget.currentTime = soundtrackStart / 1000; }} onTimeUpdate={(event) => { if (!isReelPlaying && event.currentTarget.currentTime * 1000 >= soundtrackSectionEnd) event.currentTarget.pause(); }} />}
+          <Toggle checked={reelSettings.beatSync} onChange={(beatSync) => setReelSettings((current) => ({ ...current, beatSync }))} label={soundtrackSectionBeatCount ? `Sync layer entrances to ${soundtrackSectionBeatCount} beats in this section` : "Sync layer entrances to the beat"} disabled={!soundtrackSectionBeatCount} />
+          <div className="reel-player">
+            <button type="button" onClick={isReelPlaying ? stopReelPlayback : playReel} disabled={!reelReady}>{isReelPlaying ? "Pause reel" : sceneList.length > 0 && reelPlayhead >= reelSchedule.duration ? "Replay reel" : "Play full reel"}</button>
+            <input aria-label="Reel playhead" type="range" min={0} max={Math.max(1, reelSchedule.duration)} step={10} value={Math.min(reelPlayhead, reelSchedule.duration)} onChange={(event) => { stopReelPlayback(); setPreviewMode("reel"); setReelPlayhead(Number(event.target.value)); }} />
+            <output>{(reelPlayhead / 1000).toFixed(1)} / {(reelSchedule.duration / 1000).toFixed(1)}s</output>
+          </div>
+        </section>
+        <section className="control-section">
+          <div className="panel-heading"><span className="step">02</span><div><p className="label">Active photograph</p><p className="hint">Mountains, coasts, cities, and trees all work.</p></div></div>
           <button type="button" className="project-button" onClick={() => projectInput.current?.click()}>Import .skyline.cfg project</button>
           <input ref={projectInput} type="file" accept=".cfg,.skyline.cfg,application/octet-stream" hidden onChange={(event) => { void handleProject(event); }} />
           {imageName && <p className="file-meta"><span>{imageName}</span><span>{dimensions}</span></p>}
         </section>
         <section className="control-section">
-          <div className="panel-heading"><span className="step">02</span><div><p className="label">Text layers</p><p className="hint">Select a layer to edit its type and position.</p></div></div>
+          <div className="panel-heading"><span className="step">03</span><div><p className="label">Text layers</p><p className="hint">Select a layer to edit its type and position.</p></div></div>
           <div className="text-layer-list" aria-label="Text layers">
             {textLayers.map((layer, index) => <button type="button" key={layer.id} className={layer.id === activeTextLayerId ? "active" : ""} onClick={() => setActiveTextLayerId(layer.id)} aria-pressed={layer.id === activeTextLayerId}><span>T{index + 1}</span><b>{layer.name}</b><small>{layer.text.split("\n")[0] || "Empty layer"}</small></button>)}
           </div>
-          <p className="layer-order-hint">Set the complete depth order in step 3.</p>
+          <p className="layer-order-hint">Set the complete depth order in step 4.</p>
           <button type="button" className="add-layer-button" onClick={addTextLayer}>＋ Add new text layer</button>
           {activeTextLayer && <div className="text-layer-editor">
             <div className="layer-editor-bar">
@@ -772,7 +1235,7 @@ export default function Home() {
           </div>}
         </section>
         <section className="control-section mask-section">
-          <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth order</p><p className="hint">Every image and text layer, ordered from deepest to closest.</p></div></div>
+          <div className="panel-heading"><span className="step">04</span><div><p className="label">Depth order</p><p className="hint">Every image and text layer, ordered from deepest to closest.</p></div></div>
           <div className={`mask-readout ${maskStatus}`}><span className="status-dot" />{statusText}</div>
           {maskStatus === "ready" && <p className={`quality-badge ${analysisQuality}`}>{analysisQuality === "depth" ? "Depth-enhanced analysis" : "Semantic fallback"}</p>}
           {maskError && <p className="mask-error">{maskError}</p>}
@@ -795,16 +1258,16 @@ export default function Home() {
           <Toggle checked={showMask} onChange={setShowMask} label="Show colored layer overlay" />
         </section>
         <section className="control-section animation-section">
-          <div className="panel-heading"><span className="step">04</span><div><p className="label">Animation timeline</p><p className="hint">Start from black or white, then bring every layer into the mix.</p></div></div>
+          <div className="panel-heading"><span className="step">05</span><div><p className="label">Scene animation</p><p className="hint">Animate this scene; global beat sync aligns enabled entrances during reel playback and export.</p></div></div>
           <div className="motion-presets" aria-label="Motion presets">
             <article className="motion-preset preset-reel">
-              <span className="preset-kicker">Social · 5 sec</span>
-              <strong>Modern Reel</strong>
+              <span className="preset-kicker">Social · 3 sec</span>
+              <strong>Insta Edit</strong>
               <p>Depth-first parallax, soft motion blur, and a punchy type reveal.</p>
-              <button type="button" onClick={applyModernReel} disabled={!imageName}>Apply Modern Reel</button>
+              <button type="button" onClick={applyInstaEdit} disabled={!imageName}>Apply Insta Edit</button>
             </article>
             <article className="motion-preset preset-cinema">
-              <span className="preset-kicker">Film title · 8 sec</span>
+              <span className="preset-kicker">Film title · 3 sec</span>
               <strong>Slow Cinema</strong>
               <p>A patient push-in, layered atmosphere, and an understated title fade.</p>
               <button type="button" onClick={applySlowCinema} disabled={!imageName}>Apply Slow Cinema</button>
@@ -834,13 +1297,14 @@ export default function Home() {
         <div className="export-actions">
           <button className="download-button" disabled={!imageName || busy} onClick={downloadPoster}>{busy ? statusText : "Download PNG + project"}</button>
           <button className="animation-download-button" disabled={!imageName || busy} onClick={() => { void downloadAnimation().catch((error) => setExportStatus(error instanceof Error ? error.message : "Animation export failed.")); }}>Download animated WebM</button>
+          <button className="reel-download-button" disabled={!reelReady || isReelPlaying} onClick={() => { void downloadReel().catch((error) => setExportStatus(error instanceof Error ? error.message : "Reel export failed.")); }}>Download full reel WebM{soundtrackName ? " + soundtrack" : ""}</button>
           {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
         </div>
       </aside>
       <section className="preview-panel" aria-label="Poster preview">
-        <div className="preview-topline"><div><span className={`status-dot ${semanticLayers.length ? "ready" : ""}`} />Live canvas</div><span>{imageName ? statusText : "Waiting for image"}</span></div>
-        {!imageName ? <div className={`drop-zone ${isDragging ? "dragging" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInput.current?.click(); }}><span className="drop-mark">＋</span><strong>Drop a photograph here</strong><small>or click to browse · JPEG, PNG, WebP</small></div> : <div className="canvas-stage"><canvas ref={canvasRef} aria-label="Live poster preview" />{busy && <div className="calculating-chip">{statusText}</div>}</div>}
-        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">Play the timeline to preview each scene and text layer entering independently.</span></footer>
+        <div className="preview-topline"><div><span className={`status-dot ${semanticLayers.length ? "ready" : ""}`} />{previewMode === "reel" ? "Full reel preview" : "Active scene canvas"}</div><span>{previewMode === "reel" ? `${sceneList.length} scene${sceneList.length === 1 ? "" : "s"} · ${(reelSchedule.duration / 1000).toFixed(1)}s` : imageName ? statusText : "Waiting for image"}</span></div>
+        {!imageName ? <div className={`drop-zone ${isDragging ? "dragging" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInput.current?.click(); }}><span className="drop-mark">＋</span><strong>Drop photographs here</strong><small>or click to browse · JPEG, PNG, WebP</small></div> : <div className={`canvas-stage ${previewMode === "reel" ? "reel-mode" : ""}`}><canvas ref={canvasRef} aria-label={previewMode === "reel" ? "Full reel preview" : "Live poster preview"} />{busy && <div className="calculating-chip">{statusText}</div>}</div>}
+        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">{previewMode === "reel" ? "Global playback uses the scene order, soundtrack, crossfades, and beat grid above." : "Edit and play this scene independently, then preview the full reel."}</span></footer>
       </section>
     </section>
   </main>;
@@ -851,8 +1315,8 @@ function Range({ idPrefix = "poster", label, value, min, max, suffix, onChange }
   return <div className="range-field"><span><label htmlFor={id}><b>{label}</b></label><output htmlFor={id}><input aria-label={`${label} value`} type="number" min={min} max={max} value={value} onChange={(event) => onChange(Math.min(max, Math.max(min, Number(event.target.value))))} />{suffix}</output></span><input id={id} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></div>;
 }
 
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) {
-  return <label className="toggle-row"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="toggle-track"><i /></span><b>{label}</b></label>;
+function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
+  return <label className={`toggle-row ${disabled ? "disabled" : ""}`}><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span className="toggle-track"><i /></span><b>{label}</b></label>;
 }
 
 function DepthLayerRow({ layer }: { layer: SemanticLayer }) {

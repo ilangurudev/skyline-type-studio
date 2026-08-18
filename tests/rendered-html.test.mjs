@@ -18,8 +18,10 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>Skyline Type Studio<\/title>/i);
-  assert.match(html, /Choose a photograph/i);
+  assert.match(html, /<title>Skyline Reel Studio<\/title>/i);
+  assert.match(html, /Skyline Reel Studio/i);
+  assert.match(html, /Add photographs/i);
+  assert.match(html, /Reel scenes/i);
   assert.match(html, /Text layers/i);
   assert.match(html, /Add new text layer/i);
   assert.match(html, /Select a layer to edit its type and position/i);
@@ -27,17 +29,49 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /Depth order/i);
   assert.match(html, /Every image and text layer, ordered from deepest to closest/i);
   assert.match(html, /Show colored layer overlay/i);
-  assert.match(html, /Models download once/i);
+  assert.match(html, /Photos and soundtracks stay in this browser/i);
   assert.match(html, /Download PNG \+ project/i);
-  assert.match(html, /Animation timeline/i);
-  assert.match(html, /Modern Reel/i);
+  assert.match(html, /Scene animation/i);
+  assert.match(html, /Insta Edit/i);
   assert.match(html, /Slow Cinema/i);
   assert.match(html, /Editorial Flash/i);
   assert.match(html, /Opening screen/i);
   assert.match(html, /Download animated WebM/i);
+  assert.match(html, /Download full reel WebM/i);
+  assert.match(html, /Soundtrack/i);
+  assert.match(html, /Sync layer entrances to the beat/i);
+  assert.match(html, /Play full reel/i);
+  assert.match(html, /Vertical · 9:16/i);
+  assert.match(html, /Photo · 2:3 \(4×6\)/i);
   assert.match(html, /Import \.skyline\.cfg project/i);
   assert.doesNotMatch(html, /Horizon guide/i);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/i);
+});
+
+test("composes multiple scenes with local beat detection and soundtrack export", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const reel = await readFile(new URL("../studio/reel.ts", import.meta.url), "utf8");
+  const renderer = await readFile(new URL("../studio/reel-render.ts", import.meta.url), "utf8");
+  assert.match(source, /multiple hidden onChange=\{handleFile\}/);
+  assert.match(source, /scenesRef/);
+  assert.match(source, /handleSoundtrack/);
+  assert.match(source, /decodeAudioData/);
+  assert.match(source, /createMediaStreamDestination/);
+  assert.match(source, /Select soundtrack section/);
+  assert.match(source, /Soundtrack section start/);
+  assert.match(source, /soundtrackOffset = soundtrackStart \/ 1000/);
+  assert.match(source, /audioSource\?\.start\(0, soundtrackOffset/);
+  assert.match(source, /video\/webm;codecs=vp9,opus/);
+  assert.match(source, /downloadReel/);
+  assert.match(reel, /export function detectBeats/);
+  assert.match(reel, /export function buildReelTimeline/);
+  assert.match(reel, /export function syncSceneToBeats/);
+  assert.match(reel, /nearestBeat/);
+  assert.match(renderer, /renderReelFrame/);
+  assert.match(renderer, /drawFrame/);
+  assert.match(renderer, /outputDimensions/);
+  assert.match(renderer, /transitionProgress/);
+  assert.match(renderer, /renderPoster/);
 });
 
 test("animates the base photo, depth planes, and text on one timeline", async () => {
@@ -52,9 +86,10 @@ test("animates the base photo, depth planes, and text on one timeline", async ()
   assert.match(renderer, /maskedImage\(image, layer/);
   assert.match(renderer, /animationFrame\(textLayer\.animation/);
   assert.match(renderer, /animationFinished\(timeline\.baseAnimation/);
-  assert.match(renderer, /if \(sceneSettled\) ctx\.drawImage\(image/);
+  assert.match(renderer, /if \(sceneSettled\) \{/);
+  assert.match(renderer, /if \(cover\) drawCover\(ctx, image/);
   assert.match(renderer, /frame\.blur/);
-  assert.match(source, /applyModernReel/);
+  assert.match(source, /applyInstaEdit/);
   assert.match(source, /applySlowCinema/);
   assert.match(source, /applyEditorialFlash/);
   assert.match(source, /backgroundColor: "#ffffff"/);
@@ -75,7 +110,7 @@ test("renders and depth-masks every text layer independently", async () => {
   assert.match(source, /renderPoster\(\{/);
   assert.match(renderer, /for \(const textLayer of textLayers\)/);
   assert.match(renderer, /frontLayers = semanticLayers\.filter/);
-  assert.match(renderer, /createMaskCanvas\(layer\).*destination-out/);
+  assert.match(renderer, /fittedMask\(layer.*destination-out/);
   assert.match(renderer, /globalCompositeOperation = "destination-out"/);
   assert.match(source, /addTextLayer/);
   assert.match(renderer, /extrusionLength/);
@@ -100,6 +135,12 @@ test("new text layers use the shared 15 percent default and expanded font catalo
   assert.ok((types.match(/^ {2}\["/gm) ?? []).length >= 30);
 });
 
+test("new scenes start with an empty text layer", async () => {
+  const types = await readFile(new URL("../studio/types.ts", import.meta.url), "utf8");
+  assert.match(types, /text: index === 1 \? "" : "NEW TEXT"/);
+  assert.doesNotMatch(types, /ONE DESERT/);
+});
+
 test("new projects default to a complete three-second animation", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const types = await readFile(new URL("../studio/types.ts", import.meta.url), "utf8");
@@ -107,6 +148,30 @@ test("new projects default to a complete three-second animation", async () => {
   assert.match(types, /duration: DEFAULT_TIMELINE_DURATION/);
   assert.match(source, /useState\(DEFAULT_TIMELINE_DURATION\)/);
   assert.match(types, /Math\.min\(2100, 1800 \+ \(index - 1\) \* 120\)/);
+});
+
+test("every photo-cut preset defaults to three seconds", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /function createInstaEditTimeline/);
+  assert.match(source, /duration: DEFAULT_TIMELINE_DURATION/);
+  assert.equal((source.match(/const duration = DEFAULT_TIMELINE_DURATION;/g) ?? []).length, 2);
+  assert.match(source, /Social · 3 sec/);
+  assert.match(source, /Film title · 3 sec/);
+  assert.match(source, /Editorial · 3 sec/);
+  assert.doesNotMatch(source, /Social · 5 sec|Film title · 8 sec/);
+});
+
+test("uploads auto-analyze photos sequentially with Insta Edit as the default", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /const analyzeScenesSequentially = async/);
+  assert.match(source, /for \(const \[index, scene\] of pending\.entries\(\)\)/);
+  assert.match(source, /await analyzeScene\(scene\)/);
+  assert.match(source, /await analyzeScenesSequentially\(added\)/);
+  assert.match(source, /timeline: createInstaEditTimeline\(\)/);
+  assert.match(source, /scene\.timeline = createInstaEditTimeline\(layerIds\)/);
+  assert.match(source, /applyInstaEditTextAnimations\(\[createTextLayer/);
+  assert.match(source, /queued for analysis/);
+  assert.doesNotMatch(source, /select to analyze/);
 });
 
 test("ships an agent-native preview and approved-export contract", async () => {

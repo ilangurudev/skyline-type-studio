@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Skyline Type Studio",
-  description: "Create cinematic poster typography that slips behind the skyline.",
+  title: "Skyline Reel Studio",
+  description: "Create layered, beat-synced reels from photographs and a local soundtrack.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
