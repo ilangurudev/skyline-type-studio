@@ -30,6 +30,7 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /Models download once/i);
   assert.match(html, /Download PNG \+ project/i);
   assert.match(html, /Animation timeline/i);
+  assert.match(html, /Modern Reel/i);
   assert.match(html, /Opening screen/i);
   assert.match(html, /Download animated WebM/i);
   assert.match(html, /Import \.skyline\.cfg project/i);
@@ -50,6 +51,8 @@ test("animates the base photo, depth planes, and text on one timeline", async ()
   assert.match(renderer, /animationFrame\(textLayer\.animation/);
   assert.match(renderer, /animationFinished\(timeline\.baseAnimation/);
   assert.match(renderer, /if \(sceneSettled\) ctx\.drawImage\(image/);
+  assert.match(renderer, /frame\.blur/);
+  assert.match(source, /applyModernReel/);
 });
 
 test("wires semantic masks to depth-aware layer splitting", async () => {
@@ -89,7 +92,7 @@ test("ships an agent-native preview and approved-export contract", async () => {
   assert.match(cli, /Animated export dimensions do not match/);
   assert.equal(schema.properties.schemaVersion.const, 1);
   assert.equal(schema.properties.textLayers.minItems, 1);
-  assert.deepEqual(schema.$defs.animation.properties.effect.enum, ["fade", "rise", "drift", "zoom"]);
+  assert.deepEqual(schema.$defs.animation.properties.effect.enum, ["fade", "rise", "drift", "zoom", "reel"]);
   assert.deepEqual(schema.properties.timeline.properties.backgroundColor.enum, ["#000000", "#ffffff"]);
 });
 

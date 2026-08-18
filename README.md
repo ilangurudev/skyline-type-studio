@@ -6,7 +6,9 @@ multiline text in front of or behind the layers you choose.
 
 The animation timeline can begin on black or white and reveal the original
 photo, every detected depth plane, and every text layer independently. Each
-layer can fade, rise, drift, or zoom with its own start time and duration. Play
+layer can fade, rise, drift, zoom, or use the motion-blurred Reel push with its
+own start time and duration. The one-click Modern Reel preset sequences the
+depth planes into a five-second parallax reveal. Play
 or scrub the sequence in the editor, then download a browser-rendered WebM at
 the photograph's source resolution. The still PNG export remains available.
 

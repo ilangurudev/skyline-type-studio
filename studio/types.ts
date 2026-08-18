@@ -1,5 +1,5 @@
 export type TextAlign = "left" | "center" | "right";
-export type AnimationEffect = "fade" | "rise" | "drift" | "zoom";
+export type AnimationEffect = "fade" | "rise" | "drift" | "zoom" | "reel";
 export type LayerAnimation = {
   enabled: boolean;
   effect: AnimationEffect;
@@ -176,7 +176,7 @@ export function validateRecipe(value: unknown): asserts value is StudioRecipeV1 
 function validateAnimation(value: unknown, name: string): asserts value is LayerAnimation {
   if (!value || typeof value !== "object") throw new Error(`${name} must be an animation object.`);
   const animation = value as Partial<LayerAnimation>;
-  if (typeof animation.enabled !== "boolean" || !(["fade", "rise", "drift", "zoom"] as unknown[]).includes(animation.effect)) throw new Error(`${name} has invalid animation fields.`);
+  if (typeof animation.enabled !== "boolean" || !(["fade", "rise", "drift", "zoom", "reel"] as unknown[]).includes(animation.effect)) throw new Error(`${name} has invalid animation fields.`);
   requireNumber(animation.delay, `${name}.delay`, 0, 60000);
   requireNumber(animation.duration, `${name}.duration`, 100, 60000);
 }

@@ -54,7 +54,7 @@
       "required": ["enabled", "effect", "delay", "duration"],
       "properties": {
         "enabled": { "type": "boolean" },
-        "effect": { "enum": ["fade", "rise", "drift", "zoom"] },
+        "effect": { "enum": ["fade", "rise", "drift", "zoom", "reel"] },
         "delay": { "type": "number", "minimum": 0, "maximum": 60000 },
         "duration": { "type": "number", "minimum": 100, "maximum": 60000 }
       }

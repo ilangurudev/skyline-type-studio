@@ -29,13 +29,21 @@ function mergeMasks(layers: SemanticLayer[], layerIds: string[]): BinaryMask | n
 const STATIC_ANIMATION: LayerAnimation = { enabled: false, effect: "fade", delay: 0, duration: 1 };
 
 function animationFrame(animation: LayerAnimation | undefined, time: number | undefined, width: number, height: number) {
-  if (time === undefined || !animation?.enabled) return { alpha: 1, x: 0, y: 0, scale: 1 };
+  if (time === undefined || !animation?.enabled) return { alpha: 1, x: 0, y: 0, scale: 1, rotation: 0, blur: 0 };
   const raw = Math.max(0, Math.min(1, (time - animation.delay) / Math.max(1, animation.duration)));
   const progress = 1 - Math.pow(1 - raw, 3);
-  if (animation.effect === "rise") return { alpha: progress, x: 0, y: (1 - progress) * height * 0.055, scale: 1 };
-  if (animation.effect === "drift") return { alpha: progress, x: (1 - progress) * -width * 0.045, y: 0, scale: 1 };
-  if (animation.effect === "zoom") return { alpha: progress, x: 0, y: 0, scale: 0.92 + progress * 0.08 };
-  return { alpha: progress, x: 0, y: 0, scale: 1 };
+  if (animation.effect === "rise") return { alpha: progress, x: 0, y: (1 - progress) * height * 0.055, scale: 1, rotation: 0, blur: 0 };
+  if (animation.effect === "drift") return { alpha: progress, x: (1 - progress) * -width * 0.045, y: 0, scale: 1, rotation: 0, blur: 0 };
+  if (animation.effect === "zoom") return { alpha: progress, x: 0, y: 0, scale: 0.92 + progress * 0.08, rotation: 0, blur: 0 };
+  if (animation.effect === "reel") return {
+    alpha: Math.min(1, raw * 1.7),
+    x: (1 - progress) * -width * 0.018,
+    y: (1 - progress) * height * 0.035,
+    scale: 1.085 - progress * 0.085,
+    rotation: (1 - progress) * -0.45,
+    blur: (1 - progress) * 14,
+  };
+  return { alpha: progress, x: 0, y: 0, scale: 1, rotation: 0, blur: 0 };
 }
 
 function animationFinished(animation: LayerAnimation | undefined, time: number) {
@@ -47,7 +55,9 @@ function drawTransformed(ctx: CanvasRenderingContext2D, source: CanvasImageSourc
   ctx.save();
   if (operation) ctx.globalCompositeOperation = operation;
   ctx.globalAlpha = frame.alpha;
+  ctx.filter = frame.blur > 0.1 ? `blur(${frame.blur}px)` : "none";
   ctx.translate(width / 2 + frame.x, height / 2 + frame.y);
+  ctx.rotate((frame.rotation * Math.PI) / 180);
   ctx.scale(frame.scale, frame.scale);
   ctx.drawImage(source, -width / 2, -height / 2, width, height);
   ctx.restore();

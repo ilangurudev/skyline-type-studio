@@ -525,6 +525,29 @@ export default function Home() {
     playbackFrame.current = requestAnimationFrame(tick);
   };
 
+  const applyModernReel = () => {
+    stopPlayback();
+    const duration = 5000;
+    const depthOrder = [...semanticLayers].reverse();
+    setTimeline({
+      duration,
+      backgroundColor: "#000000",
+      baseAnimation: { enabled: true, effect: "reel", delay: 80, duration: 1150 },
+      sceneAnimations: Object.fromEntries(depthOrder.map((layer, index) => [layer.id, {
+        enabled: true,
+        effect: index % 3 === 1 ? "drift" : "reel",
+        delay: 620 + index * Math.max(150, Math.min(280, 1250 / Math.max(1, depthOrder.length))),
+        duration: 1050,
+      }])),
+    });
+    setTextLayers((current) => current.map((layer, index) => ({
+      ...layer,
+      animation: { enabled: true, effect: "reel", delay: 2550 + index * 180, duration: 900 },
+    })));
+    setPlayhead(0);
+    setExportStatus("Modern Reel applied — press Play to preview");
+  };
+
   const loadFile = async (file?: File) => {
     if (!file || !file.type.startsWith("image/")) return;
     const pendingProject = pendingProjectRef.current;
@@ -737,6 +760,12 @@ export default function Home() {
         </section>
         <section className="control-section animation-section">
           <div className="panel-heading"><span className="step">04</span><div><p className="label">Animation timeline</p><p className="hint">Start from black or white, then bring every layer into the mix.</p></div></div>
+          <div className="reel-preset">
+            <span className="reel-kicker">Featured preset</span>
+            <strong>Modern Reel</strong>
+            <p>Depth-first parallax, soft motion blur, and a punchy type reveal in five seconds.</p>
+            <button type="button" onClick={applyModernReel} disabled={!imageName}>Apply Modern Reel</button>
+          </div>
           <div className="animation-stage-controls">
             <label><span>Opening screen</span><select value={timeline.backgroundColor} onChange={(event) => setTimeline((current) => ({ ...current, backgroundColor: event.target.value as TimelineSettings["backgroundColor"] }))}><option value="#000000">Black</option><option value="#ffffff">White</option></select></label>
             <label><span>Length</span><select value={timeline.duration} onChange={(event) => { const duration = Number(event.target.value); setTimeline((current) => ({ ...current, duration })); setPlayhead((current) => Math.min(current, duration)); }}><option value={3000}>3 seconds</option><option value={5000}>5 seconds</option><option value={8000}>8 seconds</option><option value={12000}>12 seconds</option></select></label>
@@ -792,7 +821,7 @@ function AnimationRow({ name, badge, animation, timelineDuration, onChange }: { 
   return <div className={`animation-row ${animation.enabled ? "active" : ""}`}>
     <div className="animation-row-title"><button type="button" className="animation-enable" onClick={() => onChange({ enabled: !animation.enabled })} aria-pressed={animation.enabled}>{animation.enabled ? "On" : "Off"}</button><span className="animation-badge">{badge}</span><b title={name}>{name}</b></div>
     {animation.enabled && <div className="animation-row-controls">
-      <label><span>Entrance</span><select value={animation.effect} onChange={(event) => onChange({ effect: event.target.value as AnimationEffect })}><option value="fade">Fade</option><option value="rise">Rise</option><option value="drift">Drift</option><option value="zoom">Zoom</option></select></label>
+      <label><span>Entrance</span><select value={animation.effect} onChange={(event) => onChange({ effect: event.target.value as AnimationEffect })}><option value="fade">Fade</option><option value="rise">Rise</option><option value="drift">Drift</option><option value="zoom">Zoom</option><option value="reel">Reel push</option></select></label>
       <label><span>Starts</span><input type="number" min={0} max={latestDelay / 1000} step={0.1} value={animation.delay / 1000} onChange={(event) => onChange({ delay: Math.max(0, Math.min(latestDelay, Number(event.target.value) * 1000)) })} /><i>s</i></label>
       <label><span>Takes</span><input type="number" min={0.1} max={timelineDuration / 1000} step={0.1} value={animation.duration / 1000} onChange={(event) => onChange({ duration: Math.max(100, Math.min(timelineDuration, Number(event.target.value) * 1000)) })} /><i>s</i></label>
     </div>}
