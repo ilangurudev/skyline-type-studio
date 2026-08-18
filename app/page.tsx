@@ -3,6 +3,25 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type TextAlign = "left" | "center" | "right";
+type TextLayer = {
+  id: string;
+  name: string;
+  text: string;
+  font: string;
+  fontSize: number;
+  lineGap: number;
+  xPosition: number;
+  yPosition: number;
+  alignment: TextAlign;
+  textColor: string;
+  shadowColor: string;
+  shadow: boolean;
+  extrusion: boolean;
+  extrusionColor: string;
+  extrusionDepth: number;
+  extrusionAngle: number;
+  frontLayerIds: string[];
+};
 type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
 type BaseSemanticMask = BinaryMask & { label: string; sourceIndex: number; averageY: number };
 type SemanticLayer = BinaryMask & { id: string; label: string; color: [number, number, number]; coverage: number; depthScore: number };
@@ -30,6 +49,28 @@ const FONT_OPTIONS = [
   ["Times", "'Times New Roman', Times, serif"],
   ["Courier", "'Courier New', monospace"],
 ] as const;
+
+function createTextLayer(id: string, index: number, frontLayerIds: string[] = []): TextLayer {
+  return {
+    id,
+    name: `Text ${index}`,
+    text: index === 1 ? "ONE DESERT\nAFTER\nANOTHER" : "NEW TEXT",
+    font: FONT_OPTIONS[0][1],
+    fontSize: index === 1 ? 14 : 10,
+    lineGap: 18,
+    xPosition: 50,
+    yPosition: index === 1 ? 38 : 50,
+    alignment: "center",
+    textColor: "#f6edd7",
+    shadowColor: "#3a2a22",
+    shadow: true,
+    extrusion: false,
+    extrusionColor: "#8a3f2b",
+    extrusionDepth: 10,
+    extrusionAngle: 45,
+    frontLayerIds,
+  };
+}
 
 async function getSegmenter() {
   if (!segmenterPromise) {
@@ -332,6 +373,7 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const analysisSequence = useRef(0);
+  const nextTextLayerId = useRef(2);
   const [imageName, setImageName] = useState("");
   const [dimensions, setDimensions] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -340,18 +382,40 @@ export default function Home() {
   const [maskError, setMaskError] = useState("");
   const [skyMask, setSkyMask] = useState<BinaryMask | null>(null);
   const [semanticLayers, setSemanticLayers] = useState<SemanticLayer[]>([]);
-  const [frontLayerIds, setFrontLayerIds] = useState<string[]>([]);
-  const [text, setText] = useState("ONE DESERT\nAFTER\nANOTHER");
-  const [font, setFont] = useState<string>(FONT_OPTIONS[0][1]);
-  const [fontSize, setFontSize] = useState(14);
-  const [lineGap, setLineGap] = useState(18);
-  const [xPosition, setXPosition] = useState(50);
-  const [yPosition, setYPosition] = useState(38);
-  const [alignment, setAlignment] = useState<TextAlign>("center");
-  const [textColor, setTextColor] = useState("#f6edd7");
-  const [shadowColor, setShadowColor] = useState("#3a2a22");
-  const [shadow, setShadow] = useState(true);
+  const [textLayers, setTextLayers] = useState<TextLayer[]>(() => [createTextLayer("text-1", 1)]);
+  const [activeTextLayerId, setActiveTextLayerId] = useState("text-1");
   const [showMask, setShowMask] = useState(false);
+  const activeTextLayer = textLayers.find((layer) => layer.id === activeTextLayerId) ?? textLayers[0];
+
+  const updateActiveTextLayer = (updates: Partial<TextLayer>) => {
+    setTextLayers((current) => current.map((layer) => layer.id === activeTextLayerId ? { ...layer, ...updates } : layer));
+  };
+
+  const addTextLayer = () => {
+    const index = nextTextLayerId.current++;
+    const layer = createTextLayer(`text-${index}`, index);
+    setTextLayers((current) => [...current, layer]);
+    setActiveTextLayerId(layer.id);
+  };
+
+  const removeActiveTextLayer = () => {
+    if (textLayers.length === 1) return;
+    const activeIndex = textLayers.findIndex((layer) => layer.id === activeTextLayerId);
+    const nextActive = textLayers[Math.max(0, activeIndex - 1)] ?? textLayers[0];
+    setTextLayers((current) => current.filter((layer) => layer.id !== activeTextLayerId));
+    setActiveTextLayerId(nextActive.id);
+  };
+
+  const moveActiveTextLayer = (direction: -1 | 1) => {
+    setTextLayers((current) => {
+      const from = current.findIndex((layer) => layer.id === activeTextLayerId);
+      const to = from + direction;
+      if (from < 0 || to < 0 || to >= current.length) return current;
+      const reordered = [...current];
+      [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
+      return reordered;
+    });
+  };
 
   const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false) => {
     const image = imageRef.current;
@@ -364,43 +428,51 @@ export default function Home() {
     const ctx = target.getContext("2d")!;
     ctx.drawImage(image, 0, 0, width, height);
 
-    const typeLayer = document.createElement("canvas");
-    typeLayer.width = width;
-    typeLayer.height = height;
-    const typeCtx = typeLayer.getContext("2d")!;
-    const sizePx = (fontSize / 100) * height;
-    const lines = text.split("\n");
-    const lineHeight = sizePx * (1 + lineGap / 100);
-    const totalHeight = Math.max(sizePx, (lines.length - 1) * lineHeight + sizePx);
-    const startBaseline = (yPosition / 100) * height - totalHeight / 2 + sizePx * 0.82;
-    const x = (xPosition / 100) * width;
-    typeCtx.font = `900 ${sizePx}px ${font}`;
-    typeCtx.textAlign = alignment;
-    typeCtx.textBaseline = "alphabetic";
-    typeCtx.lineJoin = "round";
-    lines.forEach((line, index) => {
-      const baseline = startBaseline + index * lineHeight;
-      if (shadow) {
-        typeCtx.fillStyle = shadowColor;
-        const offset = Math.max(3, sizePx * 0.045);
-        typeCtx.fillText(line, x + offset, baseline + offset);
-      }
-      typeCtx.fillStyle = textColor;
-      typeCtx.fillText(line, x, baseline);
-    });
-    ctx.drawImage(typeLayer, 0, 0);
+    for (const textLayer of textLayers) {
+      const typeCanvas = document.createElement("canvas");
+      typeCanvas.width = width;
+      typeCanvas.height = height;
+      const typeCtx = typeCanvas.getContext("2d")!;
+      const sizePx = (textLayer.fontSize / 100) * height;
+      const lines = textLayer.text.split("\n");
+      const lineHeight = sizePx * (1 + textLayer.lineGap / 100);
+      const totalHeight = Math.max(sizePx, (lines.length - 1) * lineHeight + sizePx);
+      const startBaseline = (textLayer.yPosition / 100) * height - totalHeight / 2 + sizePx * 0.82;
+      const x = (textLayer.xPosition / 100) * width;
+      typeCtx.font = `900 ${sizePx}px ${textLayer.font}`;
+      typeCtx.textAlign = textLayer.alignment;
+      typeCtx.textBaseline = "alphabetic";
+      typeCtx.lineJoin = "round";
+      const angle = (textLayer.extrusionAngle * Math.PI) / 180;
+      const extrusionLength = textLayer.extrusion ? sizePx * (textLayer.extrusionDepth / 100) : 0;
+      const extrusionX = Math.cos(angle) * extrusionLength;
+      const extrusionY = Math.sin(angle) * extrusionLength;
+      lines.forEach((line, index) => {
+        const baseline = startBaseline + index * lineHeight;
+        if (textLayer.shadow) {
+          typeCtx.fillStyle = textLayer.shadowColor;
+          const offset = Math.max(3, sizePx * 0.045);
+          typeCtx.fillText(line, x + extrusionX + offset, baseline + extrusionY + offset);
+        }
+        if (textLayer.extrusion && extrusionLength > 0) {
+          typeCtx.fillStyle = textLayer.extrusionColor;
+          const steps = Math.max(1, Math.ceil(extrusionLength));
+          for (let step = steps; step >= 1; step -= 1) {
+            const progress = step / steps;
+            typeCtx.fillText(line, x + extrusionX * progress, baseline + extrusionY * progress);
+          }
+        }
+        typeCtx.fillStyle = textLayer.textColor;
+        typeCtx.fillText(line, x, baseline);
+      });
 
-    const frontMask = mergeMasks(semanticLayers, frontLayerIds);
-    if (frontMask) {
-      const foreground = document.createElement("canvas");
-      foreground.width = width;
-      foreground.height = height;
-      const foregroundCtx = foreground.getContext("2d")!;
-      foregroundCtx.drawImage(image, 0, 0, width, height);
-      foregroundCtx.globalCompositeOperation = "destination-in";
-      foregroundCtx.imageSmoothingEnabled = true;
-      foregroundCtx.drawImage(createMaskCanvas(frontMask), 0, 0, width, height);
-      ctx.drawImage(foreground, 0, 0);
+      const frontMask = mergeMasks(semanticLayers, textLayer.frontLayerIds);
+      if (frontMask) {
+        typeCtx.globalCompositeOperation = "destination-out";
+        typeCtx.imageSmoothingEnabled = true;
+        typeCtx.drawImage(createMaskCanvas(frontMask), 0, 0, width, height);
+      }
+      ctx.drawImage(typeCanvas, 0, 0);
     }
 
     if (maskOverlay && (skyMask || semanticLayers.length)) {
@@ -423,20 +495,19 @@ export default function Home() {
           pixels.data[offset] = layer.color[0];
           pixels.data[offset + 1] = layer.color[1];
           pixels.data[offset + 2] = layer.color[2];
-          pixels.data[offset + 3] = frontLayerIds.includes(layer.id) ? 104 : 42;
+          pixels.data[offset + 3] = activeTextLayer?.frontLayerIds.includes(layer.id) ? 104 : 42;
           break;
         }
       }
       overlayCtx.putImageData(pixels, 0, 0);
       ctx.drawImage(overlay, 0, 0, width, height);
     }
-  }, [alignment, font, fontSize, frontLayerIds, lineGap, semanticLayers, shadow, shadowColor, skyMask, text, textColor, xPosition, yPosition]);
+  }, [activeTextLayer, semanticLayers, skyMask, textLayers]);
 
   const analyzeImage = useCallback(async (image: HTMLImageElement) => {
     const sequence = ++analysisSequence.current;
     setSkyMask(null);
     setSemanticLayers([]);
-    setFrontLayerIds([]);
     setAnalysisQuality("idle");
     setMaskError("");
     setMaskStatus("loading-model");
@@ -499,7 +570,7 @@ export default function Home() {
       const { layers, depthEnhanced } = createDepthLayers(groupedMasks, depthMap);
       if (!layers.length) throw new Error("No distinct depth layers were detected in this photograph.");
       setSemanticLayers(layers);
-      setFrontLayerIds(layers.map((layer) => layer.id));
+      setTextLayers((current) => current.map((textLayer) => ({ ...textLayer, frontLayerIds: layers.map((layer) => layer.id) })));
       setAnalysisQuality(depthEnhanced ? "depth" : "semantic");
       setMaskStatus("ready");
     } catch (error) {
@@ -510,7 +581,11 @@ export default function Home() {
   }, []);
 
   const setLayerInFront = (layerId: string, inFront: boolean) => {
-    setFrontLayerIds((current) => inFront ? [...new Set([...current, layerId])] : current.filter((id) => id !== layerId));
+    if (!activeTextLayer) return;
+    const frontLayerIds = inFront
+      ? [...new Set([...activeTextLayer.frontLayerIds, layerId])]
+      : activeTextLayer.frontLayerIds.filter((id) => id !== layerId);
+    updateActiveTextLayer({ frontLayerIds });
   };
 
   useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask); }, [drawPoster, showMask]);
@@ -560,21 +635,45 @@ export default function Home() {
           {imageName && <p className="file-meta"><span>{imageName}</span><span>{dimensions}</span></p>}
         </section>
         <section className="control-section">
-          <div className="panel-heading"><span className="step">02</span><div><p className="label">Poster text</p><p className="hint">Line breaks are preserved.</p></div></div>
-          <textarea value={text} onChange={(event) => setText(event.target.value)} rows={4} aria-label="Poster text" />
-          <div className="field-grid">
-            <label><span>Typeface</span><select value={font} onChange={(event) => setFont(event.target.value)}>{FONT_OPTIONS.map(([name, value]) => <option value={value} key={name}>{name}</option>)}</select></label>
-            <label><span>Alignment</span><select value={alignment} onChange={(event) => setAlignment(event.target.value as TextAlign)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+          <div className="panel-heading"><span className="step">02</span><div><p className="label">Text layers</p><p className="hint">Each layer keeps its own type, position, and depth.</p></div></div>
+          <div className="text-layer-list" aria-label="Text layers">
+            {textLayers.map((layer, index) => <button type="button" key={layer.id} className={layer.id === activeTextLayerId ? "active" : ""} onClick={() => setActiveTextLayerId(layer.id)} aria-pressed={layer.id === activeTextLayerId}><span>T{index + 1}</span><b>{layer.name}</b><small>{layer.text.split("\n")[0] || "Empty layer"}</small></button>)}
           </div>
-          <Range label="Font size" value={fontSize} min={4} max={30} suffix="%" onChange={setFontSize} />
-          <Range label="Line spacing" value={lineGap} min={-20} max={80} suffix="%" onChange={setLineGap} />
-          <Range label="Horizontal position" value={xPosition} min={0} max={100} suffix="%" onChange={setXPosition} />
-          <Range label="Vertical position" value={yPosition} min={0} max={100} suffix="%" onChange={setYPosition} />
-          <div className="color-grid">
-            <label><span>Type</span><input type="color" value={textColor} onChange={(event) => setTextColor(event.target.value)} /></label>
-            <label><span>Shadow</span><input type="color" value={shadowColor} onChange={(event) => setShadowColor(event.target.value)} /></label>
-          </div>
-          <Toggle checked={shadow} onChange={setShadow} label="Hard offset shadow" />
+          <p className="layer-order-hint">Lower text layers render in front.</p>
+          <button type="button" className="add-layer-button" onClick={addTextLayer}>＋ Add new text layer</button>
+          {activeTextLayer && <div className="text-layer-editor">
+            <div className="layer-editor-bar">
+              <label><span>Layer name</span><input value={activeTextLayer.name} onChange={(event) => updateActiveTextLayer({ name: event.target.value })} aria-label="Text layer name" /></label>
+              <div className="layer-actions" aria-label="Text layer actions">
+                <button type="button" onClick={() => moveActiveTextLayer(-1)} disabled={textLayers[0]?.id === activeTextLayer.id} aria-label="Move text layer backward">Back</button>
+                <button type="button" onClick={() => moveActiveTextLayer(1)} disabled={textLayers.at(-1)?.id === activeTextLayer.id} aria-label="Move text layer forward">Front</button>
+                <button type="button" className="remove-layer" onClick={removeActiveTextLayer} disabled={textLayers.length === 1} aria-label="Delete text layer">Delete</button>
+              </div>
+            </div>
+            <textarea value={activeTextLayer.text} onChange={(event) => updateActiveTextLayer({ text: event.target.value })} rows={4} aria-label="Poster text" />
+            <div className="field-grid">
+              <label><span>Typeface</span><select value={activeTextLayer.font} onChange={(event) => updateActiveTextLayer({ font: event.target.value })}>{FONT_OPTIONS.map(([name, value]) => <option value={value} key={name}>{name}</option>)}</select></label>
+              <label><span>Alignment</span><select value={activeTextLayer.alignment} onChange={(event) => updateActiveTextLayer({ alignment: event.target.value as TextAlign })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+            </div>
+            <Range idPrefix={activeTextLayer.id} label="Font size" value={activeTextLayer.fontSize} min={4} max={30} suffix="%" onChange={(fontSize) => updateActiveTextLayer({ fontSize })} />
+            <Range idPrefix={activeTextLayer.id} label="Line spacing" value={activeTextLayer.lineGap} min={-20} max={80} suffix="%" onChange={(lineGap) => updateActiveTextLayer({ lineGap })} />
+            <Range idPrefix={activeTextLayer.id} label="Horizontal position" value={activeTextLayer.xPosition} min={0} max={100} suffix="%" onChange={(xPosition) => updateActiveTextLayer({ xPosition })} />
+            <Range idPrefix={activeTextLayer.id} label="Vertical position" value={activeTextLayer.yPosition} min={0} max={100} suffix="%" onChange={(yPosition) => updateActiveTextLayer({ yPosition })} />
+            <div className="color-grid">
+              <label><span>Type</span><input type="color" value={activeTextLayer.textColor} onChange={(event) => updateActiveTextLayer({ textColor: event.target.value })} /></label>
+              <label><span>Shadow</span><input type="color" value={activeTextLayer.shadowColor} onChange={(event) => updateActiveTextLayer({ shadowColor: event.target.value })} /></label>
+            </div>
+            <Toggle checked={activeTextLayer.shadow} onChange={(shadow) => updateActiveTextLayer({ shadow })} label="Hard offset shadow" />
+            <div className={`effect-card ${activeTextLayer.extrusion ? "active" : ""}`}>
+              <Toggle checked={activeTextLayer.extrusion} onChange={(extrusion) => updateActiveTextLayer({ extrusion })} label="3D extrusion" />
+              <p>Build a solid side wall behind the type for more visual weight.</p>
+              {activeTextLayer.extrusion && <div className="effect-controls">
+                <label className="effect-color"><span>3D side color</span><input type="color" value={activeTextLayer.extrusionColor} onChange={(event) => updateActiveTextLayer({ extrusionColor: event.target.value })} /></label>
+                <Range idPrefix={activeTextLayer.id} label="3D depth" value={activeTextLayer.extrusionDepth} min={1} max={24} suffix="%" onChange={(extrusionDepth) => updateActiveTextLayer({ extrusionDepth })} />
+                <Range idPrefix={activeTextLayer.id} label="3D direction" value={activeTextLayer.extrusionAngle} min={-180} max={180} suffix="°" onChange={(extrusionAngle) => updateActiveTextLayer({ extrusionAngle })} />
+              </div>}
+            </div>
+          </div>}
         </section>
         <section className="control-section mask-section">
           <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth layers</p><p className="hint">Semantic objects are split into near, middle, and far planes.</p></div></div>
@@ -583,14 +682,14 @@ export default function Home() {
           {maskError && <p className="mask-error">{maskError}</p>}
           {semanticLayers.length > 0 && <>
             <div className="depth-presets" aria-label="Depth presets">
-              <button type="button" onClick={() => setFrontLayerIds(semanticLayers.map((layer) => layer.id))}>All in front</button>
-              <button type="button" onClick={() => setFrontLayerIds([])}>Text on top</button>
+              <button type="button" onClick={() => updateActiveTextLayer({ frontLayerIds: semanticLayers.map((layer) => layer.id) })}>All in front</button>
+              <button type="button" onClick={() => updateActiveTextLayer({ frontLayerIds: [] })}>Text on top</button>
             </div>
             <div className="depth-stack" aria-label="Detected image layers">
               <div className="stack-cap"><span>Closer</span><span>Object depth</span></div>
-              {semanticLayers.filter((layer) => frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront onChange={setLayerInFront} />)}
-              <div className="text-layer-marker"><span>T</span><b>Your text layer</b></div>
-              {semanticLayers.filter((layer) => !frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront={false} onChange={setLayerInFront} />)}
+              {semanticLayers.filter((layer) => activeTextLayer?.frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront onChange={setLayerInFront} />)}
+              <div className="text-layer-marker"><span>T</span><b>{activeTextLayer?.name ?? "Selected text"}</b></div>
+              {semanticLayers.filter((layer) => !activeTextLayer?.frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront={false} onChange={setLayerInFront} />)}
               <div className="base-layer"><span className="layer-swatch sky-base" /><span><b>Original photo</b><small>Base layer</small></span></div>
             </div>
           </>}
@@ -601,14 +700,14 @@ export default function Home() {
       <section className="preview-panel" aria-label="Poster preview">
         <div className="preview-topline"><div><span className={`status-dot ${semanticLayers.length ? "ready" : ""}`} />Live canvas</div><span>{imageName ? statusText : "Waiting for image"}</span></div>
         {!imageName ? <div className={`drop-zone ${isDragging ? "dragging" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInput.current?.click(); }}><span className="drop-mark">＋</span><strong>Drop a photograph here</strong><small>or click to browse · JPEG, PNG, WebP</small></div> : <div className="canvas-stage"><canvas ref={canvasRef} aria-label="Live poster preview" />{busy && <div className="calculating-chip">{statusText}</div>}</div>}
-        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">Set each object behind or in front of your text to build a custom depth stack.</span></footer>
+        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">Set each object behind or in front of the selected text layer.</span></footer>
       </section>
     </section>
   </main>;
 }
 
-function Range({ label, value, min, max, suffix, onChange }: { label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
-  const id = `range-${label.toLowerCase().replaceAll(" ", "-")}`;
+function Range({ idPrefix = "poster", label, value, min, max, suffix, onChange }: { idPrefix?: string; label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
+  const id = `range-${idPrefix}-${label.toLowerCase().replaceAll(" ", "-")}`;
   return <div className="range-field"><span><label htmlFor={id}><b>{label}</b></label><output htmlFor={id}>{value}{suffix}</output></span><input id={id} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /></div>;
 }
 

@@ -20,7 +20,10 @@ test("renders the Skyline Type Studio editor", async () => {
   const html = await response.text();
   assert.match(html, /<title>Skyline Type Studio<\/title>/i);
   assert.match(html, /Choose a photograph/i);
-  assert.match(html, /Poster text/i);
+  assert.match(html, /Text layers/i);
+  assert.match(html, /Add new text layer/i);
+  assert.match(html, /Each layer keeps its own type, position, and depth/i);
+  assert.match(html, /3D extrusion/i);
   assert.match(html, /Depth layers/i);
   assert.match(html, /Semantic objects are split into near, middle, and far planes/i);
   assert.match(html, /Show colored layer overlay/i);
@@ -36,4 +39,15 @@ test("wires semantic masks to depth-aware layer splitting", async () => {
   assert.match(source, /createDepthLayers\(groupedMasks, depthMap\)/);
   assert.match(source, /Mountain|Terrain/);
   assert.match(source, /Depth-enhanced analysis/);
+});
+
+test("renders and depth-masks every text layer independently", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /type TextLayer =/);
+  assert.match(source, /for \(const textLayer of textLayers\)/);
+  assert.match(source, /mergeMasks\(semanticLayers, textLayer\.frontLayerIds\)/);
+  assert.match(source, /globalCompositeOperation = "destination-out"/);
+  assert.match(source, /addTextLayer/);
+  assert.match(source, /extrusionLength/);
+  assert.match(source, /textLayer\.extrusionColor/);
 });
