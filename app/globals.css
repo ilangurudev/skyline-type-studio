@@ -165,39 +165,64 @@ input[type="color"] { width: 30px; height: 25px; padding: 0; border: 0; backgrou
   display: flex; justify-content: space-between; padding: 7px 9px; color: var(--muted);
   font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .1em;
 }
-.depth-layer, .base-layer, .text-layer-marker {
+.depth-layer, .base-layer, .text-depth-layer {
   display: flex; align-items: center; min-height: 43px; gap: 8px; padding: 6px 7px;
   border-top: 1px solid var(--line); background: white;
 }
-.depth-layer.is-behind { opacity: .66; }
+.depth-drop-target { position: relative; }
+.depth-stack.is-dragging .depth-drop-target::before {
+  content: ""; position: absolute; z-index: 2; top: -2px; right: 6px; left: 6px;
+  height: 4px; border-radius: 2px; background: transparent; pointer-events: none;
+}
+.depth-stack.is-dragging .depth-drop-target:hover::before { background: var(--ink); }
+.depth-drop-end { min-height: 7px; }
 .layer-swatch { width: 12px; height: 28px; flex: 0 0 auto; border: 1px solid rgba(0,0,0,.18); }
 .layer-swatch.sky-base { background: #49afff; }
 .layer-name { min-width: 0; flex: 1; font-size: 11px; font-weight: 800; }
 .layer-name small, .base-layer small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; font-weight: 500; }
-.depth-choice { display: grid; grid-template-columns: 1fr 1fr; flex: 0 0 118px; border: 1px solid var(--line); }
-.depth-choice button { min-width: 0; height: 27px; padding: 0 5px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 9px; font-weight: 800; }
-.depth-choice button + button { border-left: 1px solid var(--line); }
-.depth-choice button.active { background: var(--ink); color: white; }
-.text-layer-marker { background: var(--acid); border-color: var(--ink); }
-.text-layer-marker > span { width: 28px; height: 28px; display: grid; place-items: center; background: var(--ink); color: white; font: 900 15px/1 Georgia, serif; }
-.text-layer-marker b { font-size: 11px; }
+.text-depth-layer { background: var(--acid); border-color: var(--ink); cursor: grab; }
+.text-depth-layer:active { cursor: grabbing; }
+.text-depth-layer:focus-visible { position: relative; z-index: 3; outline: 2px solid var(--ink); outline-offset: -2px; }
+.text-depth-badge { width: 28px; height: 28px; display: grid; place-items: center; background: var(--ink); color: white; font: 900 12px/1 Georgia, serif; }
+.drag-handle { width: 22px; display: grid; gap: 3px; padding: 6px 2px; }
+.drag-handle i { display: block; height: 2px; border-radius: 2px; background: var(--ink); }
 .base-layer > span:last-child { font-size: 11px; }
 .animation-stage-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
-.reel-preset {
-  position: relative; margin-top: 16px; padding: 15px; overflow: hidden;
+.motion-presets { display: grid; gap: 9px; margin-top: 16px; }
+.motion-preset {
+  --preset-accent: var(--acid);
+  position: relative; min-height: 138px; padding: 15px; overflow: hidden;
   border: 1px solid var(--ink); color: white; background: #171712;
-  box-shadow: 4px 4px 0 var(--acid);
+  box-shadow: 4px 4px 0 var(--preset-accent);
 }
-.reel-preset::after {
-  content: ""; position: absolute; width: 120px; height: 120px; right: -50px; top: -60px;
-  border: 18px solid var(--acid); border-radius: 50%; opacity: .85;
+.motion-preset::after {
+  content: ""; position: absolute; z-index: 0; pointer-events: none;
 }
-.reel-preset .reel-kicker { display: block; color: var(--acid); font-size: 8px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
-.reel-preset strong { display: block; margin-top: 4px; font-size: 20px; letter-spacing: -.035em; }
-.reel-preset p { max-width: 240px; margin: 6px 0 12px; color: #c9c5bb; font-size: 10px; line-height: 1.4; }
-.reel-preset button { min-height: 32px; padding: 0 12px; border: 0; background: var(--acid); color: var(--ink); cursor: pointer; font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
-.reel-preset button:hover:not(:disabled) { background: white; }
-.reel-preset button:disabled { opacity: .4; cursor: not-allowed; }
+.motion-preset > * { position: relative; z-index: 1; }
+.motion-preset .preset-kicker { display: block; color: var(--preset-accent); font-size: 8px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
+.motion-preset strong { display: block; margin-top: 4px; font-size: 20px; letter-spacing: -.035em; }
+.motion-preset p { max-width: 245px; margin: 6px 0 12px; color: #c9c5bb; font-size: 10px; line-height: 1.4; }
+.motion-preset button { min-height: 32px; padding: 0 12px; border: 0; background: var(--preset-accent); color: var(--ink); cursor: pointer; font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
+.motion-preset button:hover:not(:disabled) { background: white; }
+.motion-preset button:disabled { opacity: .4; cursor: not-allowed; }
+.preset-reel::after {
+  width: 120px; height: 120px; right: -50px; top: -60px;
+  border: 18px solid var(--preset-accent); border-radius: 50%; opacity: .85;
+}
+.preset-cinema { --preset-accent: #e7bf77; background: linear-gradient(145deg, #1a1815, #30281e); }
+.preset-cinema::after {
+  width: 150px; height: 150px; right: -92px; top: -54px;
+  border: 1px solid var(--preset-accent); transform: rotate(35deg); opacity: .75;
+}
+.preset-editorial { --preset-accent: #ff664d; color: var(--ink); background: #f5f1e7; }
+.preset-editorial::after {
+  width: 88px; height: 180px; right: -24px; top: -35px;
+  background: var(--preset-accent); transform: rotate(18deg);
+}
+.preset-editorial .preset-kicker { color: #c33522; }
+.preset-editorial p { color: #625d54; }
+.preset-editorial button { color: white; }
+.preset-editorial button:hover:not(:disabled) { background: var(--ink); }
 .animation-stage-controls label, .animation-row-controls label { min-width: 0; }
 .animation-stage-controls label > span, .animation-row-controls label > span { display: block; margin-bottom: 5px; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
 .animation-stage-controls select { height: 36px; padding: 7px; font-size: 11px; font-weight: 700; }

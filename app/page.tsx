@@ -3,33 +3,13 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createProjectArchive, deserializeAnalysis, readProjectArchive, serializeAnalysis, sha256File } from "@/studio/project";
 import { renderPoster } from "@/studio/render";
-import { createLayerAnimation, createTimelineSettings } from "@/studio/types";
-import type { AnimationEffect, LayerAnimation, SkylineProjectV1, SourceFingerprint, TimelineSettings } from "@/studio/types";
+import { createLayerAnimation, createTextLayer, createTimelineSettings, DEFAULT_TIMELINE_DURATION, FONT_OPTIONS } from "@/studio/types";
+import type { AnimationEffect, LayerAnimation, SkylineProjectV1, SourceFingerprint, TextAlign, TextLayer, TimelineSettings } from "@/studio/types";
 
-type TextAlign = "left" | "center" | "right";
-type TextLayer = {
-  id: string;
-  name: string;
-  text: string;
-  font: string;
-  fontSize: number;
-  lineGap: number;
-  xPosition: number;
-  yPosition: number;
-  alignment: TextAlign;
-  textColor: string;
-  shadowColor: string;
-  shadow: boolean;
-  extrusion: boolean;
-  extrusionColor: string;
-  extrusionDepth: number;
-  extrusionAngle: number;
-  frontLayerIds: string[];
-  animation: LayerAnimation;
-};
 type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
 type BaseSemanticMask = BinaryMask & { label: string; sourceIndex: number; averageY: number };
 type SemanticLayer = BinaryMask & { id: string; label: string; color: [number, number, number]; coverage: number; depthScore: number };
+type DepthStackItem = { kind: "semantic"; layer: SemanticLayer } | { kind: "text"; layer: TextLayer; textIndex: number };
 type MaskStatus = "idle" | "loading-model" | "analyzing" | "ready" | "error";
 type Segment = { label?: string; mask: { width: number; height: number; data: ArrayLike<number> } };
 type Segmenter = (input: HTMLCanvasElement) => Promise<Segment[]>;
@@ -45,38 +25,6 @@ const LAYER_COLORS: Array<[number, number, number]> = [
   [217, 255, 72], [255, 112, 84], [255, 194, 66], [162, 117, 255],
   [72, 224, 187], [255, 111, 193], [97, 155, 255], [231, 231, 90],
 ];
-
-const FONT_OPTIONS = [
-  ["Impact", "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif"],
-  ["Arial Black", "'Arial Black', Arial, sans-serif"],
-  ["Helvetica", "Helvetica, Arial, sans-serif"],
-  ["Georgia", "Georgia, serif"],
-  ["Times", "'Times New Roman', Times, serif"],
-  ["Courier", "'Courier New', monospace"],
-] as const;
-
-function createTextLayer(id: string, index: number, frontLayerIds: string[] = []): TextLayer {
-  return {
-    id,
-    name: `Text ${index}`,
-    text: index === 1 ? "ONE DESERT\nAFTER\nANOTHER" : "NEW TEXT",
-    font: FONT_OPTIONS[0][1],
-    fontSize: index === 1 ? 14 : 10,
-    lineGap: 18,
-    xPosition: 50,
-    yPosition: index === 1 ? 38 : 50,
-    alignment: "center",
-    textColor: "#f6edd7",
-    shadowColor: "#3a2a22",
-    shadow: true,
-    extrusion: false,
-    extrusionColor: "#8a3f2b",
-    extrusionDepth: 10,
-    extrusionAngle: 45,
-    frontLayerIds,
-    animation: { enabled: true, effect: "rise", delay: 3600 + (index - 1) * 200, duration: 1200 },
-  };
-}
 
 async function getSegmenter() {
   if (!segmenterPromise) {
@@ -346,6 +294,23 @@ function createDepthLayers(baseMasks: BaseSemanticMask[], depth: Float32Array | 
   };
 }
 
+function createDepthStack(semanticLayers: SemanticLayer[], textLayers: TextLayer[]): DepthStackItem[] {
+  const deepestFirst = [...semanticLayers].reverse();
+  const textBySlot = new Map<number, Array<{ layer: TextLayer; textIndex: number }>>();
+  for (const [textIndex, layer] of textLayers.entries()) {
+    const foregroundCount = semanticLayers.filter((semanticLayer) => layer.frontLayerIds.includes(semanticLayer.id)).length;
+    const slot = Math.max(0, Math.min(semanticLayers.length, semanticLayers.length - foregroundCount));
+    textBySlot.set(slot, [...(textBySlot.get(slot) ?? []), { layer, textIndex }]);
+  }
+
+  const stack: DepthStackItem[] = [];
+  for (let slot = 0; slot <= deepestFirst.length; slot += 1) {
+    for (const text of textBySlot.get(slot) ?? []) stack.push({ kind: "text", ...text });
+    if (slot < deepestFirst.length) stack.push({ kind: "semantic", layer: deepestFirst[slot] });
+  }
+  return stack;
+}
+
 export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
@@ -367,9 +332,10 @@ export default function Home() {
   const [semanticLayers, setSemanticLayers] = useState<SemanticLayer[]>([]);
   const [textLayers, setTextLayers] = useState<TextLayer[]>(() => [createTextLayer("text-1", 1)]);
   const [activeTextLayerId, setActiveTextLayerId] = useState("text-1");
+  const [draggedTextLayerId, setDraggedTextLayerId] = useState<string | null>(null);
   const [showMask, setShowMask] = useState(false);
   const [timeline, setTimeline] = useState<TimelineSettings>(() => createTimelineSettings());
-  const [playhead, setPlayhead] = useState(5000);
+  const [playhead, setPlayhead] = useState(DEFAULT_TIMELINE_DURATION);
   const [isPlaying, setIsPlaying] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
   const activeTextLayer = textLayers.find((layer) => layer.id === activeTextLayerId) ?? textLayers[0];
@@ -391,17 +357,6 @@ export default function Home() {
     const nextActive = textLayers[Math.max(0, activeIndex - 1)] ?? textLayers[0];
     setTextLayers((current) => current.filter((layer) => layer.id !== activeTextLayerId));
     setActiveTextLayerId(nextActive.id);
-  };
-
-  const moveActiveTextLayer = (direction: -1 | 1) => {
-    setTextLayers((current) => {
-      const from = current.findIndex((layer) => layer.id === activeTextLayerId);
-      const to = from + direction;
-      if (from < 0 || to < 0 || to >= current.length) return current;
-      const reordered = [...current];
-      [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
-      return reordered;
-    });
   };
 
   const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false, maxDimension?: number, time?: number) => {
@@ -493,12 +448,39 @@ export default function Home() {
     }
   }, []);
 
-  const setLayerInFront = (layerId: string, inFront: boolean) => {
-    if (!activeTextLayer) return;
-    const frontLayerIds = inFront
-      ? [...new Set([...activeTextLayer.frontLayerIds, layerId])]
-      : activeTextLayer.frontLayerIds.filter((id) => id !== layerId);
-    updateActiveTextLayer({ frontLayerIds });
+  const depthStack = createDepthStack(semanticLayers, textLayers);
+
+  const moveTextLayerToDepthIndex = (textLayerId: string, targetIndex: number) => {
+    setTextLayers((current) => {
+      const currentStack = createDepthStack(semanticLayers, current);
+      const currentIndex = currentStack.findIndex((item) => item.kind === "text" && item.layer.id === textLayerId);
+      const remaining = currentStack.filter((item) => item.kind !== "text" || item.layer.id !== textLayerId);
+      const adjustedTarget = currentIndex >= 0 && targetIndex > currentIndex ? targetIndex - 1 : targetIndex;
+      const insertionIndex = Math.max(0, Math.min(remaining.length, adjustedTarget));
+      const movedLayer = current.find((layer) => layer.id === textLayerId);
+      if (!movedLayer) return current;
+      const nextStack: DepthStackItem[] = [...remaining];
+      nextStack.splice(insertionIndex, 0, { kind: "text", layer: movedLayer, textIndex: 0 });
+      const movedIndex = nextStack.findIndex((item) => item.kind === "text" && item.layer.id === textLayerId);
+      const frontLayerIds = nextStack
+        .slice(movedIndex + 1)
+        .filter((item): item is Extract<DepthStackItem, { kind: "semantic" }> => item.kind === "semantic")
+        .map((item) => item.layer.id)
+        .reverse();
+      const byId = new Map(current.map((layer) => [layer.id, layer]));
+      return nextStack
+        .filter((item): item is Extract<DepthStackItem, { kind: "text" }> => item.kind === "text")
+        .map((item) => {
+          const layer = byId.get(item.layer.id)!;
+          return layer.id === textLayerId ? { ...layer, frontLayerIds } : layer;
+        });
+    });
+  };
+
+  const nudgeTextLayer = (textLayerId: string, direction: -1 | 1) => {
+    const currentIndex = depthStack.findIndex((item) => item.kind === "text" && item.layer.id === textLayerId);
+    if (currentIndex < 0) return;
+    moveTextLayerToDepthIndex(textLayerId, direction < 0 ? currentIndex - 1 : currentIndex + 2);
   };
 
   useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask, undefined, playhead); }, [drawPoster, showMask, playhead]);
@@ -546,6 +528,59 @@ export default function Home() {
     })));
     setPlayhead(0);
     setExportStatus("Modern Reel applied — press Play to preview");
+  };
+
+  const applySlowCinema = () => {
+    stopPlayback();
+    const duration = 8000;
+    const depthOrder = [...semanticLayers].reverse();
+    const gap = Math.max(240, Math.min(520, 1800 / Math.max(1, depthOrder.length)));
+    setTimeline({
+      duration,
+      backgroundColor: "#000000",
+      baseAnimation: { enabled: true, effect: "zoom", delay: 180, duration: 2100 },
+      sceneAnimations: Object.fromEntries(depthOrder.map((layer, index) => [layer.id, {
+        enabled: true,
+        effect: index % 2 === 0 ? "fade" : "drift",
+        delay: 1250 + index * gap,
+        duration: 1800,
+      }])),
+    });
+    setTextLayers((current) => current.map((layer, index) => ({
+      ...layer,
+      animation: { enabled: true, effect: "fade", delay: 4300 + index * 360, duration: 1700 },
+    })));
+    setPlayhead(0);
+    setExportStatus("Slow Cinema applied — press Play to preview");
+  };
+
+  const applyEditorialFlash = () => {
+    stopPlayback();
+    const duration = 3000;
+    const depthOrder = [...semanticLayers].reverse();
+    const gap = Math.max(90, Math.min(180, 620 / Math.max(1, depthOrder.length)));
+    setTimeline({
+      duration,
+      backgroundColor: "#ffffff",
+      baseAnimation: { enabled: true, effect: "drift", delay: 0, duration: 520 },
+      sceneAnimations: Object.fromEntries(depthOrder.map((layer, index) => [layer.id, {
+        enabled: true,
+        effect: index % 2 === 0 ? "rise" : "drift",
+        delay: 330 + index * gap,
+        duration: 520,
+      }])),
+    });
+    setTextLayers((current) => current.map((layer, index) => ({
+      ...layer,
+      animation: {
+        enabled: true,
+        effect: index % 2 === 0 ? "rise" : "reel",
+        delay: 1280 + index * 130,
+        duration: 520,
+      },
+    })));
+    setPlayhead(0);
+    setExportStatus("Editorial Flash applied — press Play to preview");
   };
 
   const loadFile = async (file?: File) => {
@@ -698,18 +733,16 @@ export default function Home() {
           {imageName && <p className="file-meta"><span>{imageName}</span><span>{dimensions}</span></p>}
         </section>
         <section className="control-section">
-          <div className="panel-heading"><span className="step">02</span><div><p className="label">Text layers</p><p className="hint">Each layer keeps its own type, position, and depth.</p></div></div>
+          <div className="panel-heading"><span className="step">02</span><div><p className="label">Text layers</p><p className="hint">Select a layer to edit its type and position.</p></div></div>
           <div className="text-layer-list" aria-label="Text layers">
             {textLayers.map((layer, index) => <button type="button" key={layer.id} className={layer.id === activeTextLayerId ? "active" : ""} onClick={() => setActiveTextLayerId(layer.id)} aria-pressed={layer.id === activeTextLayerId}><span>T{index + 1}</span><b>{layer.name}</b><small>{layer.text.split("\n")[0] || "Empty layer"}</small></button>)}
           </div>
-          <p className="layer-order-hint">Lower text layers render in front.</p>
+          <p className="layer-order-hint">Set the complete depth order in step 3.</p>
           <button type="button" className="add-layer-button" onClick={addTextLayer}>＋ Add new text layer</button>
           {activeTextLayer && <div className="text-layer-editor">
             <div className="layer-editor-bar">
               <label><span>Layer name</span><input value={activeTextLayer.name} onChange={(event) => updateActiveTextLayer({ name: event.target.value })} aria-label="Text layer name" /></label>
               <div className="layer-actions" aria-label="Text layer actions">
-                <button type="button" onClick={() => moveActiveTextLayer(-1)} disabled={textLayers[0]?.id === activeTextLayer.id} aria-label="Move text layer backward">Back</button>
-                <button type="button" onClick={() => moveActiveTextLayer(1)} disabled={textLayers.at(-1)?.id === activeTextLayer.id} aria-label="Move text layer forward">Front</button>
                 <button type="button" className="remove-layer" onClick={removeActiveTextLayer} disabled={textLayers.length === 1} aria-label="Delete text layer">Delete</button>
               </div>
             </div>
@@ -739,32 +772,49 @@ export default function Home() {
           </div>}
         </section>
         <section className="control-section mask-section">
-          <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth layers</p><p className="hint">Semantic objects are split into near, middle, and far planes.</p></div></div>
+          <div className="panel-heading"><span className="step">03</span><div><p className="label">Depth order</p><p className="hint">Every image and text layer, ordered from deepest to closest.</p></div></div>
           <div className={`mask-readout ${maskStatus}`}><span className="status-dot" />{statusText}</div>
           {maskStatus === "ready" && <p className={`quality-badge ${analysisQuality}`}>{analysisQuality === "depth" ? "Depth-enhanced analysis" : "Semantic fallback"}</p>}
           {maskError && <p className="mask-error">{maskError}</p>}
           {semanticLayers.length > 0 && <>
             <div className="depth-presets" aria-label="Depth presets">
-              <button type="button" onClick={() => updateActiveTextLayer({ frontLayerIds: semanticLayers.map((layer) => layer.id) })}>All in front</button>
-              <button type="button" onClick={() => updateActiveTextLayer({ frontLayerIds: [] })}>Text on top</button>
+              <button type="button" onClick={() => setTextLayers((current) => current.map((layer) => ({ ...layer, frontLayerIds: semanticLayers.map((semanticLayer) => semanticLayer.id) })))}>Text behind objects</button>
+              <button type="button" onClick={() => setTextLayers((current) => current.map((layer) => ({ ...layer, frontLayerIds: [] })))}>Text on top</button>
             </div>
-            <div className="depth-stack" aria-label="Detected image layers">
-              <div className="stack-cap"><span>Closer</span><span>Object depth</span></div>
-              {semanticLayers.filter((layer) => activeTextLayer?.frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront onChange={setLayerInFront} />)}
-              <div className="text-layer-marker"><span>T</span><b>{activeTextLayer?.name ?? "Selected text"}</b></div>
-              {semanticLayers.filter((layer) => !activeTextLayer?.frontLayerIds.includes(layer.id)).map((layer) => <DepthLayerRow key={layer.id} layer={layer} inFront={false} onChange={setLayerInFront} />)}
-              <div className="base-layer"><span className="layer-swatch sky-base" /><span><b>Original photo</b><small>Base layer</small></span></div>
+            <div className={`depth-stack ${draggedTextLayerId ? "is-dragging" : ""}`} aria-label="Complete layer depth order">
+              <div className="stack-cap"><span>Deepest</span><span>Closest</span></div>
+              <div className="base-layer"><span className="layer-swatch sky-base" /><span><b>Original photo</b><small>Base image · fixed</small></span></div>
+              {depthStack.map((item, index) => <div className="depth-drop-target" key={`${item.kind}-${item.layer.id}-drop`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); const textLayerId = draggedTextLayerId || event.dataTransfer.getData("text/plain"); if (textLayerId) moveTextLayerToDepthIndex(textLayerId, index); setDraggedTextLayerId(null); }}>
+                {item.kind === "semantic"
+                  ? <DepthLayerRow layer={item.layer} />
+                  : <TextDepthRow layer={item.layer} textIndex={item.textIndex} onDragStart={(event) => { setDraggedTextLayerId(item.layer.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.layer.id); }} onDragEnd={() => setDraggedTextLayerId(null)} onNudge={(direction) => nudgeTextLayer(item.layer.id, direction)} />}
+              </div>)}
+              <div className="depth-drop-target depth-drop-end" onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => { event.preventDefault(); const textLayerId = draggedTextLayerId || event.dataTransfer.getData("text/plain"); if (textLayerId) moveTextLayerToDepthIndex(textLayerId, depthStack.length); setDraggedTextLayerId(null); }} />
             </div>
           </>}
           <Toggle checked={showMask} onChange={setShowMask} label="Show colored layer overlay" />
         </section>
         <section className="control-section animation-section">
           <div className="panel-heading"><span className="step">04</span><div><p className="label">Animation timeline</p><p className="hint">Start from black or white, then bring every layer into the mix.</p></div></div>
-          <div className="reel-preset">
-            <span className="reel-kicker">Featured preset</span>
-            <strong>Modern Reel</strong>
-            <p>Depth-first parallax, soft motion blur, and a punchy type reveal in five seconds.</p>
-            <button type="button" onClick={applyModernReel} disabled={!imageName}>Apply Modern Reel</button>
+          <div className="motion-presets" aria-label="Motion presets">
+            <article className="motion-preset preset-reel">
+              <span className="preset-kicker">Social · 5 sec</span>
+              <strong>Modern Reel</strong>
+              <p>Depth-first parallax, soft motion blur, and a punchy type reveal.</p>
+              <button type="button" onClick={applyModernReel} disabled={!imageName}>Apply Modern Reel</button>
+            </article>
+            <article className="motion-preset preset-cinema">
+              <span className="preset-kicker">Film title · 8 sec</span>
+              <strong>Slow Cinema</strong>
+              <p>A patient push-in, layered atmosphere, and an understated title fade.</p>
+              <button type="button" onClick={applySlowCinema} disabled={!imageName}>Apply Slow Cinema</button>
+            </article>
+            <article className="motion-preset preset-editorial">
+              <span className="preset-kicker">Editorial · 3 sec</span>
+              <strong>Editorial Flash</strong>
+              <p>A white-flash open, sharp scene cuts, and quick staggered typography.</p>
+              <button type="button" onClick={applyEditorialFlash} disabled={!imageName}>Apply Editorial Flash</button>
+            </article>
           </div>
           <div className="animation-stage-controls">
             <label><span>Opening screen</span><select value={timeline.backgroundColor} onChange={(event) => setTimeline((current) => ({ ...current, backgroundColor: event.target.value as TimelineSettings["backgroundColor"] }))}><option value="#000000">Black</option><option value="#ffffff">White</option></select></label>
@@ -805,14 +855,21 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (val
   return <label className="toggle-row"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="toggle-track"><i /></span><b>{label}</b></label>;
 }
 
-function DepthLayerRow({ layer, inFront, onChange }: { layer: SemanticLayer; inFront: boolean; onChange: (layerId: string, inFront: boolean) => void }) {
-  return <div className={`depth-layer ${inFront ? "is-front" : "is-behind"}`}>
+function DepthLayerRow({ layer }: { layer: SemanticLayer }) {
+  return <div className="depth-layer">
     <span className="layer-swatch" style={{ backgroundColor: `rgb(${layer.color.join(",")})` }} />
-    <span className="layer-name">{layer.label}<small>{Math.max(0.1, layer.coverage * 100).toFixed(1)}%</small></span>
-    <span className="depth-choice" role="group" aria-label={`${layer.label} text depth`}>
-      <button type="button" className={!inFront ? "active" : ""} aria-pressed={!inFront} onClick={() => onChange(layer.id, false)}>Behind</button>
-      <button type="button" className={inFront ? "active" : ""} aria-pressed={inFront} onClick={() => onChange(layer.id, true)}>In front</button>
-    </span>
+    <span className="layer-name">{layer.label}<small>Image · {Math.max(0.1, layer.coverage * 100).toFixed(1)}%</small></span>
+  </div>;
+}
+
+function TextDepthRow({ layer, textIndex, onDragStart, onDragEnd, onNudge }: { layer: TextLayer; textIndex: number; onDragStart: (event: DragEvent<HTMLDivElement>) => void; onDragEnd: () => void; onNudge: (direction: -1 | 1) => void }) {
+  return <div className="text-depth-layer" role="button" draggable onDragStart={onDragStart} onDragEnd={onDragEnd} tabIndex={0} onKeyDown={(event) => {
+    if (event.key === "ArrowUp") { event.preventDefault(); onNudge(-1); }
+    if (event.key === "ArrowDown") { event.preventDefault(); onNudge(1); }
+  }} aria-label={`${layer.name}, text layer. Drag to reorder depth, or use up and down arrow keys.`}>
+    <span className="text-depth-badge">T{textIndex + 1}</span>
+    <span className="layer-name">{layer.name}<small>Text layer</small></span>
+    <span className="drag-handle" aria-hidden="true"><i /><i /><i /></span>
   </div>;
 }
 

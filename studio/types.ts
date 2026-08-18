@@ -82,10 +82,37 @@ export const FONT_OPTIONS = [
   ["Impact", "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif"],
   ["Arial Black", "'Arial Black', Arial, sans-serif"],
   ["Helvetica", "Helvetica, Arial, sans-serif"],
+  ["Arial", "Arial, Helvetica, sans-serif"],
+  ["Avenir Next", "'Avenir Next', Avenir, sans-serif"],
+  ["Futura", "Futura, 'Trebuchet MS', sans-serif"],
+  ["Gill Sans", "'Gill Sans', 'Gill Sans MT', Calibri, sans-serif"],
+  ["Trebuchet", "'Trebuchet MS', Arial, sans-serif"],
+  ["Verdana", "Verdana, Geneva, sans-serif"],
+  ["Tahoma", "Tahoma, Verdana, sans-serif"],
+  ["Century Gothic", "'Century Gothic', 'AppleGothic', sans-serif"],
+  ["Franklin Gothic", "'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif"],
+  ["Optima", "Optima, Candara, sans-serif"],
+  ["Copperplate", "Copperplate, 'Copperplate Gothic Light', fantasy"],
+  ["Rockwell", "Rockwell, 'Roboto Slab', serif"],
+  ["Baskerville", "Baskerville, 'Baskerville Old Face', serif"],
   ["Georgia", "Georgia, serif"],
-  ["Times", "'Times New Roman', Times, serif"],
-  ["Courier", "'Courier New', monospace"],
+  ["Garamond", "Garamond, 'Adobe Garamond Pro', serif"],
+  ["Palatino", "Palatino, 'Palatino Linotype', 'Book Antiqua', serif"],
+  ["Times New Roman", "'Times New Roman', Times, serif"],
+  ["Didot", "Didot, 'Bodoni MT', serif"],
+  ["Bodoni 72", "'Bodoni 72', 'Bodoni MT', Didot, serif"],
+  ["Hoefler Text", "'Hoefler Text', 'Baskerville Old Face', serif"],
+  ["American Typewriter", "'American Typewriter', 'Courier New', serif"],
+  ["Courier New", "'Courier New', Courier, monospace"],
+  ["Menlo", "Menlo, Monaco, Consolas, monospace"],
+  ["Monaco", "Monaco, Menlo, monospace"],
+  ["Consolas", "Consolas, 'Liberation Mono', monospace"],
+  ["Brush Script", "'Brush Script MT', 'Segoe Script', cursive"],
+  ["Marker Felt", "'Marker Felt', 'Comic Sans MS', cursive"],
+  ["Chalkboard", "'Chalkboard SE', 'Comic Sans MS', cursive"],
 ] as const;
+
+export const DEFAULT_TIMELINE_DURATION = 3000;
 
 export function createTextLayer(id: string, index: number, frontLayerIds: string[] = []): TextLayer {
   return {
@@ -93,7 +120,7 @@ export function createTextLayer(id: string, index: number, frontLayerIds: string
     name: `Text ${index}`,
     text: index === 1 ? "ONE DESERT\nAFTER\nANOTHER" : "NEW TEXT",
     font: FONT_OPTIONS[0][1],
-    fontSize: index === 1 ? 14 : 10,
+    fontSize: 15,
     lineGap: 18,
     xPosition: 50,
     yPosition: index === 1 ? 38 : 50,
@@ -106,7 +133,7 @@ export function createTextLayer(id: string, index: number, frontLayerIds: string
     extrusionDepth: 10,
     extrusionAngle: 45,
     frontLayerIds,
-    animation: { enabled: true, effect: "rise", delay: 3600 + (index - 1) * 200, duration: 1200 },
+    animation: { enabled: true, effect: "rise", delay: Math.min(2100, 1800 + (index - 1) * 120), duration: 800 },
   };
 }
 
@@ -116,12 +143,12 @@ export function createLayerAnimation(delay = 0, duration = 1200): LayerAnimation
 
 export function createTimelineSettings(layerIds: string[] = []): TimelineSettings {
   return {
-    duration: 5000,
+    duration: DEFAULT_TIMELINE_DURATION,
     backgroundColor: "#000000",
-    baseAnimation: createLayerAnimation(250, 1200),
+    baseAnimation: createLayerAnimation(150, 800),
     sceneAnimations: Object.fromEntries([...layerIds].reverse().map((id, index) => {
-      const gap = layerIds.length > 1 ? Math.min(650, 1900 / (layerIds.length - 1)) : 0;
-      return [id, createLayerAnimation(1100 + index * gap, 1200)];
+      const gap = layerIds.length > 1 ? Math.min(320, 850 / (layerIds.length - 1)) : 0;
+      return [id, createLayerAnimation(650 + index * gap, 850)];
     })),
   };
 }

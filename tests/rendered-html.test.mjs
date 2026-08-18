@@ -22,15 +22,17 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /Choose a photograph/i);
   assert.match(html, /Text layers/i);
   assert.match(html, /Add new text layer/i);
-  assert.match(html, /Each layer keeps its own type, position, and depth/i);
+  assert.match(html, /Select a layer to edit its type and position/i);
   assert.match(html, /3D extrusion/i);
-  assert.match(html, /Depth layers/i);
-  assert.match(html, /Semantic objects are split into near, middle, and far planes/i);
+  assert.match(html, /Depth order/i);
+  assert.match(html, /Every image and text layer, ordered from deepest to closest/i);
   assert.match(html, /Show colored layer overlay/i);
   assert.match(html, /Models download once/i);
   assert.match(html, /Download PNG \+ project/i);
   assert.match(html, /Animation timeline/i);
   assert.match(html, /Modern Reel/i);
+  assert.match(html, /Slow Cinema/i);
+  assert.match(html, /Editorial Flash/i);
   assert.match(html, /Opening screen/i);
   assert.match(html, /Download animated WebM/i);
   assert.match(html, /Import \.skyline\.cfg project/i);
@@ -53,6 +55,9 @@ test("animates the base photo, depth planes, and text on one timeline", async ()
   assert.match(renderer, /if \(sceneSettled\) ctx\.drawImage\(image/);
   assert.match(renderer, /frame\.blur/);
   assert.match(source, /applyModernReel/);
+  assert.match(source, /applySlowCinema/);
+  assert.match(source, /applyEditorialFlash/);
+  assert.match(source, /backgroundColor: "#ffffff"/);
 });
 
 test("wires semantic masks to depth-aware layer splitting", async () => {
@@ -66,7 +71,7 @@ test("wires semantic masks to depth-aware layer splitting", async () => {
 test("renders and depth-masks every text layer independently", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const renderer = await readFile(new URL("../studio/render.ts", import.meta.url), "utf8");
-  assert.match(source, /type TextLayer =/);
+  assert.match(source, /TextAlign, TextLayer/);
   assert.match(source, /renderPoster\(\{/);
   assert.match(renderer, /for \(const textLayer of textLayers\)/);
   assert.match(renderer, /frontLayers = semanticLayers\.filter/);
@@ -75,6 +80,33 @@ test("renders and depth-masks every text layer independently", async () => {
   assert.match(source, /addTextLayer/);
   assert.match(renderer, /extrusionLength/);
   assert.match(renderer, /textLayer\.extrusionColor/);
+  assert.match(source, /createDepthStack/);
+  assert.match(source, /Complete layer depth order/);
+  assert.match(source, /draggable onDragStart/);
+  assert.match(source, /drag-handle/);
+  assert.match(source, /Deepest.*Closest/);
+});
+
+test("new text layers use the shared 15 percent default and expanded font catalog", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const types = await readFile(new URL("../studio/types.ts", import.meta.url), "utf8");
+  assert.match(source, /createTextLayer/);
+  assert.match(source, /FONT_OPTIONS/);
+  assert.doesNotMatch(source, /const FONT_OPTIONS =/);
+  assert.match(types, /fontSize: 15/);
+  assert.match(types, /\["Avenir Next"/);
+  assert.match(types, /\["Bodoni 72"/);
+  assert.match(types, /\["Menlo"/);
+  assert.ok((types.match(/^ {2}\["/gm) ?? []).length >= 30);
+});
+
+test("new projects default to a complete three-second animation", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const types = await readFile(new URL("../studio/types.ts", import.meta.url), "utf8");
+  assert.match(types, /DEFAULT_TIMELINE_DURATION = 3000/);
+  assert.match(types, /duration: DEFAULT_TIMELINE_DURATION/);
+  assert.match(source, /useState\(DEFAULT_TIMELINE_DURATION\)/);
+  assert.match(types, /Math\.min\(2100, 1800 \+ \(index - 1\) \* 120\)/);
 });
 
 test("ships an agent-native preview and approved-export contract", async () => {
