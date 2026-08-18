@@ -1,4 +1,18 @@
 export type TextAlign = "left" | "center" | "right";
+export type AnimationEffect = "fade" | "rise" | "drift" | "zoom";
+export type LayerAnimation = {
+  enabled: boolean;
+  effect: AnimationEffect;
+  delay: number;
+  duration: number;
+};
+
+export type TimelineSettings = {
+  duration: number;
+  backgroundColor: "#000000" | "#ffffff";
+  baseAnimation: LayerAnimation;
+  sceneAnimations: Record<string, LayerAnimation>;
+};
 
 export type TextLayer = {
   id: string;
@@ -18,6 +32,7 @@ export type TextLayer = {
   extrusionDepth: number;
   extrusionAngle: number;
   frontLayerIds: string[];
+  animation: LayerAnimation;
 };
 
 export type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
@@ -44,6 +59,7 @@ export type StudioRecipeV1 = {
   schemaVersion: 1;
   activeTextLayerId: string;
   textLayers: TextLayer[];
+  timeline?: TimelineSettings;
 };
 
 export type SourceFingerprint = {
@@ -90,12 +106,26 @@ export function createTextLayer(id: string, index: number, frontLayerIds: string
     extrusionDepth: 10,
     extrusionAngle: 45,
     frontLayerIds,
+    animation: { enabled: true, effect: "rise", delay: 500 + (index - 1) * 250, duration: 900 },
+  };
+}
+
+export function createLayerAnimation(delay = 0): LayerAnimation {
+  return { enabled: true, effect: "fade", delay, duration: 900 };
+}
+
+export function createTimelineSettings(layerIds: string[] = []): TimelineSettings {
+  return {
+    duration: 5000,
+    backgroundColor: "#000000",
+    baseAnimation: createLayerAnimation(0),
+    sceneAnimations: Object.fromEntries(layerIds.map((id, index) => [id, createLayerAnimation(250 + index * 250)])),
   };
 }
 
 export function createRecipe(frontLayerIds: string[] = []): StudioRecipeV1 {
   const textLayer = createTextLayer("text-1", 1, frontLayerIds);
-  return { schemaVersion: 1, activeTextLayerId: textLayer.id, textLayers: [textLayer] };
+  return { schemaVersion: 1, activeTextLayerId: textLayer.id, textLayers: [textLayer], timeline: createTimelineSettings(frontLayerIds) };
 }
 
 function requireNumber(value: unknown, name: string, min: number, max: number) {
@@ -128,6 +158,22 @@ export function validateRecipe(value: unknown): asserts value is StudioRecipeV1 
     if (typeof layer.shadow !== "boolean" || typeof layer.extrusion !== "boolean" || !Array.isArray(layer.frontLayerIds) || !layer.frontLayerIds.every((id) => typeof id === "string")) {
       throw new Error(`Text layer ${layer.id} has invalid effect or depth fields.`);
     }
+    if (layer.animation !== undefined) validateAnimation(layer.animation, `${layer.id}.animation`);
   }
   if (typeof recipe.activeTextLayerId !== "string" || !ids.has(recipe.activeTextLayerId)) throw new Error("activeTextLayerId must identify an existing text layer.");
+  if (recipe.timeline !== undefined) {
+    requireNumber(recipe.timeline.duration, "timeline.duration", 500, 60000);
+    if (!["#000000", "#ffffff"].includes(recipe.timeline.backgroundColor)) throw new Error("timeline.backgroundColor must be black or white.");
+    validateAnimation(recipe.timeline.baseAnimation, "timeline.baseAnimation");
+    if (!recipe.timeline.sceneAnimations || typeof recipe.timeline.sceneAnimations !== "object") throw new Error("timeline.sceneAnimations must be an object.");
+    for (const [id, animation] of Object.entries(recipe.timeline.sceneAnimations)) validateAnimation(animation, `timeline.sceneAnimations.${id}`);
+  }
+}
+
+function validateAnimation(value: unknown, name: string): asserts value is LayerAnimation {
+  if (!value || typeof value !== "object") throw new Error(`${name} must be an animation object.`);
+  const animation = value as Partial<LayerAnimation>;
+  if (typeof animation.enabled !== "boolean" || !(["fade", "rise", "drift", "zoom"] as unknown[]).includes(animation.effect)) throw new Error(`${name} has invalid animation fields.`);
+  requireNumber(animation.delay, `${name}.delay`, 0, 60000);
+  requireNumber(animation.duration, `${name}.duration`, 100, 60000);
 }

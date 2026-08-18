@@ -4,6 +4,12 @@ Create cinematic, layered poster typography from any photograph. Skyline Type
 Studio segments a photo into semantic and depth-aware layers, then lets you put
 multiline text in front of or behind the layers you choose.
 
+The animation timeline can begin on black or white and reveal the original
+photo, every detected depth plane, and every text layer independently. Each
+layer can fade, rise, drift, or zoom with its own start time and duration. Play
+or scrub the sequence in the editor, then download a browser-rendered WebM at
+the photograph's source resolution. The still PNG export remains available.
+
 Everything runs locally in the browser. Photos are not uploaded to a server,
 and there is no account or sign-in.
 
@@ -78,6 +84,7 @@ Pushes to `main` deploy it using `.github/workflows/deploy-pages.yml`.
 - Monocular depth estimation separates large regions into near, middle, and far
   layers.
 - Canvas compositing renders the selected scene layers over or under the text.
+- A shared timeline animates scene masks and typography without uploading frames.
 - The finished poster downloads as a full-resolution PNG.
 
 The browser loads quantized SegFormer and Depth Anything V2 models from Hugging

@@ -3,7 +3,8 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createProjectArchive, deserializeAnalysis, readProjectArchive, serializeAnalysis, sha256File } from "@/studio/project";
 import { renderPoster } from "@/studio/render";
-import type { SkylineProjectV1, SourceFingerprint } from "@/studio/types";
+import { createLayerAnimation, createTimelineSettings } from "@/studio/types";
+import type { AnimationEffect, LayerAnimation, SkylineProjectV1, SourceFingerprint, TimelineSettings } from "@/studio/types";
 
 type TextAlign = "left" | "center" | "right";
 type TextLayer = {
@@ -24,6 +25,7 @@ type TextLayer = {
   extrusionDepth: number;
   extrusionAngle: number;
   frontLayerIds: string[];
+  animation: LayerAnimation;
 };
 type BinaryMask = { width: number; height: number; data: Uint8ClampedArray };
 type BaseSemanticMask = BinaryMask & { label: string; sourceIndex: number; averageY: number };
@@ -72,6 +74,7 @@ function createTextLayer(id: string, index: number, frontLayerIds: string[] = []
     extrusionDepth: 10,
     extrusionAngle: 45,
     frontLayerIds,
+    animation: { enabled: true, effect: "rise", delay: 500 + (index - 1) * 250, duration: 900 },
   };
 }
 
@@ -352,6 +355,8 @@ export default function Home() {
   const pendingProjectRef = useRef<SkylineProjectV1 | null>(null);
   const analysisSequence = useRef(0);
   const nextTextLayerId = useRef(2);
+  const playbackFrame = useRef<number | null>(null);
+  const playbackStartedAt = useRef(0);
   const [imageName, setImageName] = useState("");
   const [dimensions, setDimensions] = useState("");
   const [isDragging, setIsDragging] = useState(false);
@@ -363,6 +368,10 @@ export default function Home() {
   const [textLayers, setTextLayers] = useState<TextLayer[]>(() => [createTextLayer("text-1", 1)]);
   const [activeTextLayerId, setActiveTextLayerId] = useState("text-1");
   const [showMask, setShowMask] = useState(false);
+  const [timeline, setTimeline] = useState<TimelineSettings>(() => createTimelineSettings());
+  const [playhead, setPlayhead] = useState(5000);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [exportStatus, setExportStatus] = useState("");
   const activeTextLayer = textLayers.find((layer) => layer.id === activeTextLayerId) ?? textLayers[0];
 
   const updateActiveTextLayer = (updates: Partial<TextLayer>) => {
@@ -395,11 +404,11 @@ export default function Home() {
     });
   };
 
-  const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false, maxDimension?: number) => {
+  const drawPoster = useCallback((target: HTMLCanvasElement, maskOverlay = false, maxDimension?: number, time?: number) => {
     const image = imageRef.current;
     if (!image) return;
-    return renderPoster({ target, image, textLayers, semanticLayers, skyMask, activeTextLayerId, maskOverlay, maxDimension });
-  }, [activeTextLayerId, semanticLayers, skyMask, textLayers]);
+    return renderPoster({ target, image, textLayers, semanticLayers, skyMask, activeTextLayerId, maskOverlay, maxDimension, time, timeline });
+  }, [activeTextLayerId, semanticLayers, skyMask, textLayers, timeline]);
 
   const analyzeImage = useCallback(async (image: HTMLImageElement) => {
     const sequence = ++analysisSequence.current;
@@ -468,6 +477,10 @@ export default function Home() {
       if (!layers.length) throw new Error("No distinct depth layers were detected in this photograph.");
       setSemanticLayers(layers);
       setTextLayers((current) => current.map((textLayer) => ({ ...textLayer, frontLayerIds: layers.map((layer) => layer.id) })));
+      setTimeline((current) => ({
+        ...current,
+        sceneAnimations: Object.fromEntries(layers.map((layer, index) => [layer.id, current.sceneAnimations[layer.id] ?? createLayerAnimation(300 + index * 300)])),
+      }));
       setAnalysisQuality(depthEnhanced ? "depth" : "semantic");
       setMaskStatus("ready");
     } catch (error) {
@@ -485,7 +498,29 @@ export default function Home() {
     updateActiveTextLayer({ frontLayerIds });
   };
 
-  useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask); }, [drawPoster, showMask]);
+  useEffect(() => { if (canvasRef.current) drawPoster(canvasRef.current, showMask, undefined, playhead); }, [drawPoster, showMask, playhead]);
+
+  useEffect(() => () => { if (playbackFrame.current !== null) cancelAnimationFrame(playbackFrame.current); }, []);
+
+  const stopPlayback = useCallback(() => {
+    if (playbackFrame.current !== null) cancelAnimationFrame(playbackFrame.current);
+    playbackFrame.current = null;
+    setIsPlaying(false);
+  }, []);
+
+  const play = () => {
+    stopPlayback();
+    const startAt = playhead >= timeline.duration ? 0 : playhead;
+    playbackStartedAt.current = performance.now() - startAt;
+    setIsPlaying(true);
+    const tick = (now: number) => {
+      const next = Math.min(timeline.duration, now - playbackStartedAt.current);
+      setPlayhead(next);
+      if (next < timeline.duration) playbackFrame.current = requestAnimationFrame(tick);
+      else stopPlayback();
+    };
+    playbackFrame.current = requestAnimationFrame(tick);
+  };
 
   const loadFile = async (file?: File) => {
     if (!file || !file.type.startsWith("image/")) return;
@@ -524,6 +559,9 @@ export default function Home() {
         setSemanticLayers(restored.layers);
         setAnalysisQuality(restored.quality);
         setTextLayers(pendingProject.recipe.textLayers);
+        const restoredTimeline = pendingProject.recipe.timeline ?? createTimelineSettings(restored.layers.map((layer) => layer.id));
+        setTimeline(restoredTimeline);
+        setPlayhead(restoredTimeline.duration);
         setActiveTextLayerId(pendingProject.recipe.activeTextLayerId);
         nextTextLayerId.current = Math.max(2, pendingProject.recipe.textLayers.length + 1);
         setMaskStatus("ready");
@@ -574,11 +612,48 @@ export default function Home() {
           createdAt: new Date().toISOString(),
           source,
           analysis: serializeAnalysis(analysisQuality, skyMask, semanticLayers),
-          recipe: { schemaVersion: 1, activeTextLayerId, textLayers },
+          recipe: { schemaVersion: 1, activeTextLayerId, textLayers, timeline },
         };
         triggerDownload(new Blob([createProjectArchive(project)], { type: "application/octet-stream" }), `${baseName}.skyline.cfg`);
       }
     }, "image/png");
+  };
+
+  const downloadAnimation = async () => {
+    if (!imageRef.current || !canvasRef.current || typeof MediaRecorder === "undefined") return;
+    stopPlayback();
+    setExportStatus("Rendering animation…");
+    const exportCanvas = document.createElement("canvas");
+    drawPoster(exportCanvas, false, undefined, 0);
+    const stream = exportCanvas.captureStream(30);
+    const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 12_000_000 } : undefined);
+    const finished = new Promise<Blob>((resolve, reject) => {
+      recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+      recorder.onerror = () => reject(new Error("The browser could not record this animation."));
+      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+    });
+    recorder.start();
+    const started = performance.now();
+    await new Promise<void>((resolve) => {
+      const renderFrame = (now: number) => {
+        const time = Math.min(timeline.duration, now - started);
+        drawPoster(exportCanvas, false, undefined, time);
+        setPlayhead(time);
+        if (time < timeline.duration) requestAnimationFrame(renderFrame);
+        else { recorder.stop(); resolve(); }
+      };
+      requestAnimationFrame(renderFrame);
+    });
+    const blob = await finished;
+    const baseName = imageName.replace(/\.[^.]+$/, "") || "poster";
+    triggerDownload(blob, `${baseName}-skyline-animation.webm`);
+    setExportStatus("WebM saved at source resolution");
+  };
+
+  const updateSceneAnimation = (layerId: string, updates: Partial<LayerAnimation>) => {
+    setTimeline((current) => ({ ...current, sceneAnimations: { ...current.sceneAnimations, [layerId]: { ...(current.sceneAnimations[layerId] ?? createLayerAnimation()), ...updates } } }));
   };
 
   const busy = maskStatus === "loading-model" || maskStatus === "analyzing";
@@ -657,12 +732,33 @@ export default function Home() {
           </>}
           <Toggle checked={showMask} onChange={setShowMask} label="Show colored layer overlay" />
         </section>
-        <button className="download-button" disabled={!imageName || busy} onClick={downloadPoster}>{busy ? statusText : "Download PNG + project"}</button>
+        <section className="control-section animation-section">
+          <div className="panel-heading"><span className="step">04</span><div><p className="label">Animation timeline</p><p className="hint">Start from black or white, then bring every layer into the mix.</p></div></div>
+          <div className="animation-stage-controls">
+            <label><span>Opening screen</span><select value={timeline.backgroundColor} onChange={(event) => setTimeline((current) => ({ ...current, backgroundColor: event.target.value as TimelineSettings["backgroundColor"] }))}><option value="#000000">Black</option><option value="#ffffff">White</option></select></label>
+            <label><span>Length</span><select value={timeline.duration} onChange={(event) => { const duration = Number(event.target.value); setTimeline((current) => ({ ...current, duration })); setPlayhead((current) => Math.min(current, duration)); }}><option value={3000}>3 seconds</option><option value={5000}>5 seconds</option><option value={8000}>8 seconds</option><option value={12000}>12 seconds</option></select></label>
+          </div>
+          <div className="timeline-player">
+            <button type="button" className="play-button" onClick={isPlaying ? stopPlayback : play} disabled={!imageName}>{isPlaying ? "Pause" : playhead >= timeline.duration ? "Replay" : "Play"}</button>
+            <input aria-label="Animation playhead" type="range" min={0} max={timeline.duration} step={16} value={playhead} onChange={(event) => { stopPlayback(); setPlayhead(Number(event.target.value)); }} />
+            <output>{(playhead / 1000).toFixed(1)}s</output>
+          </div>
+          <div className="animation-layer-list">
+            <AnimationRow name="Original photo / sky" badge="BG" animation={timeline.baseAnimation} timelineDuration={timeline.duration} onChange={(updates) => setTimeline((current) => ({ ...current, baseAnimation: { ...current.baseAnimation, ...updates } }))} />
+            {semanticLayers.map((layer, index) => <AnimationRow key={layer.id} name={layer.label} badge={`D${index + 1}`} animation={timeline.sceneAnimations[layer.id] ?? createLayerAnimation()} timelineDuration={timeline.duration} onChange={(updates) => updateSceneAnimation(layer.id, updates)} />)}
+            {textLayers.map((layer, index) => <AnimationRow key={layer.id} name={layer.name} badge={`T${index + 1}`} animation={layer.animation ?? createLayerAnimation()} timelineDuration={timeline.duration} onChange={(updates) => setTextLayers((current) => current.map((candidate) => candidate.id === layer.id ? { ...candidate, animation: { ...(candidate.animation ?? createLayerAnimation()), ...updates } } : candidate))} />)}
+          </div>
+        </section>
+        <div className="export-actions">
+          <button className="download-button" disabled={!imageName || busy} onClick={downloadPoster}>{busy ? statusText : "Download PNG + project"}</button>
+          <button className="animation-download-button" disabled={!imageName || busy} onClick={() => { void downloadAnimation().catch((error) => setExportStatus(error instanceof Error ? error.message : "Animation export failed.")); }}>Download animated WebM</button>
+          {exportStatus && <p className="export-status" aria-live="polite">{exportStatus}</p>}
+        </div>
       </aside>
       <section className="preview-panel" aria-label="Poster preview">
         <div className="preview-topline"><div><span className={`status-dot ${semanticLayers.length ? "ready" : ""}`} />Live canvas</div><span>{imageName ? statusText : "Waiting for image"}</span></div>
         {!imageName ? <div className={`drop-zone ${isDragging ? "dragging" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") fileInput.current?.click(); }}><span className="drop-mark">＋</span><strong>Drop a photograph here</strong><small>or click to browse · JPEG, PNG, WebP</small></div> : <div className="canvas-stage"><canvas ref={canvasRef} aria-label="Live poster preview" />{busy && <div className="calculating-chip">{statusText}</div>}</div>}
-        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">Set each object behind or in front of the selected text layer.</span></footer>
+        <footer className="preview-footer"><span><i className="key-swatch sky" />Sky / base</span><span><i className="key-swatch land" />Selected layers</span><span className="footer-tip">Play the timeline to preview each scene and text layer entering independently.</span></footer>
       </section>
     </section>
   </main>;
@@ -685,5 +781,17 @@ function DepthLayerRow({ layer, inFront, onChange }: { layer: SemanticLayer; inF
       <button type="button" className={!inFront ? "active" : ""} aria-pressed={!inFront} onClick={() => onChange(layer.id, false)}>Behind</button>
       <button type="button" className={inFront ? "active" : ""} aria-pressed={inFront} onClick={() => onChange(layer.id, true)}>In front</button>
     </span>
+  </div>;
+}
+
+function AnimationRow({ name, badge, animation, timelineDuration, onChange }: { name: string; badge: string; animation: LayerAnimation; timelineDuration: number; onChange: (updates: Partial<LayerAnimation>) => void }) {
+  const latestDelay = Math.max(0, timelineDuration - Math.min(100, animation.duration));
+  return <div className={`animation-row ${animation.enabled ? "active" : ""}`}>
+    <div className="animation-row-title"><button type="button" className="animation-enable" onClick={() => onChange({ enabled: !animation.enabled })} aria-pressed={animation.enabled}>{animation.enabled ? "On" : "Off"}</button><span className="animation-badge">{badge}</span><b title={name}>{name}</b></div>
+    {animation.enabled && <div className="animation-row-controls">
+      <label><span>Entrance</span><select value={animation.effect} onChange={(event) => onChange({ effect: event.target.value as AnimationEffect })}><option value="fade">Fade</option><option value="rise">Rise</option><option value="drift">Drift</option><option value="zoom">Zoom</option></select></label>
+      <label><span>Starts</span><input type="number" min={0} max={latestDelay / 1000} step={0.1} value={animation.delay / 1000} onChange={(event) => onChange({ delay: Math.max(0, Math.min(latestDelay, Number(event.target.value) * 1000)) })} /><i>s</i></label>
+      <label><span>Takes</span><input type="number" min={0.1} max={timelineDuration / 1000} step={0.1} value={animation.duration / 1000} onChange={(event) => onChange({ duration: Math.max(100, Math.min(timelineDuration, Number(event.target.value) * 1000)) })} /><i>s</i></label>
+    </div>}
   </div>;
 }

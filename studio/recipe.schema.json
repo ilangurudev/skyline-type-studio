@@ -32,8 +32,31 @@
           "extrusionColor": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
           "extrusionDepth": { "type": "number", "minimum": 0, "maximum": 100 },
           "extrusionAngle": { "type": "number", "minimum": -360, "maximum": 360 },
-          "frontLayerIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+          "frontLayerIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "animation": { "$ref": "#/$defs/animation" }
         }
+      }
+    },
+    "timeline": {
+      "type": "object",
+      "required": ["duration", "backgroundColor", "baseAnimation", "sceneAnimations"],
+      "properties": {
+        "duration": { "type": "number", "minimum": 500, "maximum": 60000 },
+        "backgroundColor": { "enum": ["#000000", "#ffffff"] },
+        "baseAnimation": { "$ref": "#/$defs/animation" },
+        "sceneAnimations": { "type": "object", "additionalProperties": { "$ref": "#/$defs/animation" } }
+      }
+    }
+  },
+  "$defs": {
+    "animation": {
+      "type": "object",
+      "required": ["enabled", "effect", "delay", "duration"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "effect": { "enum": ["fade", "rise", "drift", "zoom"] },
+        "delay": { "type": "number", "minimum": 0, "maximum": 60000 },
+        "duration": { "type": "number", "minimum": 100, "maximum": 60000 }
       }
     }
   }

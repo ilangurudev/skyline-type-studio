@@ -1,4 +1,4 @@
-import type { BinaryMask, SemanticLayer, TextLayer } from "./types";
+import type { BinaryMask, LayerAnimation, SemanticLayer, TextLayer, TimelineSettings } from "./types";
 
 function createMaskCanvas(mask: BinaryMask) {
   const canvas = document.createElement("canvas");
@@ -26,6 +26,40 @@ function mergeMasks(layers: SemanticLayer[], layerIds: string[]): BinaryMask | n
   return { width, height, data };
 }
 
+const STATIC_ANIMATION: LayerAnimation = { enabled: false, effect: "fade", delay: 0, duration: 1 };
+
+function animationFrame(animation: LayerAnimation | undefined, time: number | undefined, width: number, height: number) {
+  if (time === undefined || !animation?.enabled) return { alpha: 1, x: 0, y: 0, scale: 1 };
+  const raw = Math.max(0, Math.min(1, (time - animation.delay) / Math.max(1, animation.duration)));
+  const progress = 1 - Math.pow(1 - raw, 3);
+  if (animation.effect === "rise") return { alpha: progress, x: 0, y: (1 - progress) * height * 0.055, scale: 1 };
+  if (animation.effect === "drift") return { alpha: progress, x: (1 - progress) * -width * 0.045, y: 0, scale: 1 };
+  if (animation.effect === "zoom") return { alpha: progress, x: 0, y: 0, scale: 0.92 + progress * 0.08 };
+  return { alpha: progress, x: 0, y: 0, scale: 1 };
+}
+
+function drawTransformed(ctx: CanvasRenderingContext2D, source: CanvasImageSource, frame: ReturnType<typeof animationFrame>, width: number, height: number, operation?: GlobalCompositeOperation) {
+  if (frame.alpha <= 0) return;
+  ctx.save();
+  if (operation) ctx.globalCompositeOperation = operation;
+  ctx.globalAlpha = frame.alpha;
+  ctx.translate(width / 2 + frame.x, height / 2 + frame.y);
+  ctx.scale(frame.scale, frame.scale);
+  ctx.drawImage(source, -width / 2, -height / 2, width, height);
+  ctx.restore();
+}
+
+function maskedImage(image: HTMLImageElement, mask: BinaryMask, width: number, height: number) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(image, 0, 0, width, height);
+  ctx.globalCompositeOperation = "destination-in";
+  ctx.drawImage(createMaskCanvas(mask), 0, 0, width, height);
+  return canvas;
+}
+
 export function renderPoster({
   target,
   image,
@@ -35,6 +69,8 @@ export function renderPoster({
   activeTextLayerId,
   maskOverlay = false,
   maxDimension,
+  time,
+  timeline,
 }: {
   target: HTMLCanvasElement;
   image: HTMLImageElement;
@@ -44,6 +80,8 @@ export function renderPoster({
   activeTextLayerId?: string;
   maskOverlay?: boolean;
   maxDimension?: number;
+  time?: number;
+  timeline?: TimelineSettings;
 }) {
   const longestEdge = Math.max(image.naturalWidth, image.naturalHeight);
   const scale = maxDimension ? Math.min(1, maxDimension / longestEdge) : 1;
@@ -53,7 +91,27 @@ export function renderPoster({
   target.height = height;
   const ctx = target.getContext("2d");
   if (!ctx) throw new Error("The browser could not allocate the export canvas.");
-  ctx.drawImage(image, 0, 0, width, height);
+  if (time !== undefined && timeline) {
+    ctx.fillStyle = timeline.backgroundColor;
+    ctx.fillRect(0, 0, width, height);
+    const allSceneMask = mergeMasks(semanticLayers, semanticLayers.map((layer) => layer.id));
+    const baseCanvas = document.createElement("canvas");
+    baseCanvas.width = width;
+    baseCanvas.height = height;
+    const baseCtx = baseCanvas.getContext("2d")!;
+    baseCtx.drawImage(image, 0, 0, width, height);
+    if (allSceneMask) {
+      baseCtx.globalCompositeOperation = "destination-out";
+      baseCtx.drawImage(createMaskCanvas(allSceneMask), 0, 0, width, height);
+    }
+    drawTransformed(ctx, baseCanvas, animationFrame(timeline.baseAnimation, time, width, height), width, height);
+    for (const layer of [...semanticLayers].reverse()) {
+      const animation = timeline.sceneAnimations[layer.id] ?? STATIC_ANIMATION;
+      drawTransformed(ctx, maskedImage(image, layer, width, height), animationFrame(animation, time, width, height), width, height);
+    }
+  } else {
+    ctx.drawImage(image, 0, 0, width, height);
+  }
 
   for (const textLayer of textLayers) {
     const typeCanvas = document.createElement("canvas");
@@ -94,13 +152,16 @@ export function renderPoster({
       typeCtx.fillText(line, x, baseline);
     });
 
-    const frontMask = mergeMasks(semanticLayers, textLayer.frontLayerIds);
-    if (frontMask) {
+    const frontLayers = semanticLayers.filter((layer) => textLayer.frontLayerIds.includes(layer.id));
+    if (frontLayers.length) {
       typeCtx.globalCompositeOperation = "destination-out";
       typeCtx.imageSmoothingEnabled = true;
-      typeCtx.drawImage(createMaskCanvas(frontMask), 0, 0, width, height);
+      for (const layer of frontLayers) {
+        const animation = timeline?.sceneAnimations[layer.id] ?? STATIC_ANIMATION;
+        drawTransformed(typeCtx, createMaskCanvas(layer), animationFrame(animation, time, width, height), width, height, "destination-out");
+      }
     }
-    ctx.drawImage(typeCanvas, 0, 0);
+    drawTransformed(ctx, typeCanvas, animationFrame(textLayer.animation, time, width, height), width, height);
   }
 
   if (maskOverlay && (skyMask || semanticLayers.length)) {

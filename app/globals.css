@@ -71,6 +71,15 @@ h1 { margin: 2px 0 0; font-size: clamp(34px, 4vw, 64px); line-height: .98; lette
 .download-button { margin-top: 26px; background: var(--ink); color: white; }
 .download-button:not(:disabled):hover { background: #34342e; }
 .download-button:disabled { opacity: .42; cursor: not-allowed; }
+.export-actions { margin-top: 26px; }
+.export-actions .download-button { margin-top: 0; }
+.animation-download-button {
+  width: 100%; min-height: 44px; margin-top: 8px; border: 1px solid var(--ink);
+  background: var(--acid); color: var(--ink); font-weight: 800; cursor: pointer;
+}
+.animation-download-button:not(:disabled):hover { background: #c9f12b; }
+.animation-download-button:disabled { opacity: .42; cursor: not-allowed; }
+.export-status { margin: 8px 0 0; color: var(--muted); font-size: 10px; text-align: center; }
 .divider { height: 1px; background: var(--line); margin: 24px 0; }
 textarea, select {
   width: 100%; border: 1px solid var(--line); background: white; border-radius: 0;
@@ -173,6 +182,27 @@ input[type="color"] { width: 30px; height: 25px; padding: 0; border: 0; backgrou
 .text-layer-marker > span { width: 28px; height: 28px; display: grid; place-items: center; background: var(--ink); color: white; font: 900 15px/1 Georgia, serif; }
 .text-layer-marker b { font-size: 11px; }
 .base-layer > span:last-child { font-size: 11px; }
+.animation-stage-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+.animation-stage-controls label, .animation-row-controls label { min-width: 0; }
+.animation-stage-controls label > span, .animation-row-controls label > span { display: block; margin-bottom: 5px; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.animation-stage-controls select { height: 36px; padding: 7px; font-size: 11px; font-weight: 700; }
+.timeline-player { display: grid; grid-template-columns: 58px minmax(0, 1fr) 38px; align-items: center; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid var(--ink); background: var(--acid); }
+.timeline-player .play-button { height: 30px; padding: 0 8px; border: 1px solid var(--ink); background: var(--ink); color: white; font-size: 10px; font-weight: 800; cursor: pointer; }
+.timeline-player .play-button:disabled { opacity: .4; }
+.timeline-player output { text-align: right; font-size: 10px; font-weight: 800; }
+.animation-layer-list { display: grid; gap: 7px; margin-top: 12px; }
+.animation-row { border: 1px solid var(--line); background: #f4f1e9; }
+.animation-row.active { background: white; border-color: #aaa397; }
+.animation-row-title { display: grid; grid-template-columns: 36px 28px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 38px; padding: 5px 7px; }
+.animation-row-title b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.animation-enable { height: 24px; padding: 0; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 9px; font-weight: 900; cursor: pointer; }
+.animation-row.active .animation-enable { border-color: var(--ink); background: var(--ink); color: white; }
+.animation-badge { height: 24px; display: grid; place-items: center; background: #e5e0d5; font-size: 9px; font-weight: 900; }
+.animation-row-controls { display: grid; grid-template-columns: 1.25fr .8fr .8fr; gap: 7px; padding: 9px 8px 10px; border-top: 1px solid var(--line); }
+.animation-row-controls select, .animation-row-controls input { width: 100%; height: 30px; padding: 4px 6px; border: 1px solid var(--line); background: white; font-size: 10px; font-style: normal; }
+.animation-row-controls label { position: relative; }
+.animation-row-controls label i { position: absolute; right: 6px; bottom: 8px; color: var(--muted); font-size: 9px; font-style: normal; pointer-events: none; }
+.animation-row-controls label input { padding-right: 16px; }
 @keyframes pulse { 50% { opacity: .35; } }
 
 .preview-panel { min-width: 0; padding: 20px; display: flex; flex-direction: column; background: #d9d5cc; }

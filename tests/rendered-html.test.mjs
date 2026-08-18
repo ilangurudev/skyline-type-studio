@@ -29,9 +29,25 @@ test("renders the Skyline Type Studio editor", async () => {
   assert.match(html, /Show colored layer overlay/i);
   assert.match(html, /Models download once/i);
   assert.match(html, /Download PNG \+ project/i);
+  assert.match(html, /Animation timeline/i);
+  assert.match(html, /Opening screen/i);
+  assert.match(html, /Download animated WebM/i);
   assert.match(html, /Import \.skyline\.cfg project/i);
   assert.doesNotMatch(html, /Horizon guide/i);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/i);
+});
+
+test("animates the base photo, depth planes, and text on one timeline", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const renderer = await readFile(new URL("../studio/render.ts", import.meta.url), "utf8");
+  assert.match(source, /timeline\.baseAnimation/);
+  assert.match(source, /timeline\.sceneAnimations/);
+  assert.match(source, /layer\.animation/);
+  assert.match(source, /MediaRecorder/);
+  assert.match(source, /captureStream\(30\)/);
+  assert.match(renderer, /timeline\.backgroundColor/);
+  assert.match(renderer, /maskedImage\(image, layer/);
+  assert.match(renderer, /animationFrame\(textLayer\.animation/);
 });
 
 test("wires semantic masks to depth-aware layer splitting", async () => {
@@ -48,7 +64,8 @@ test("renders and depth-masks every text layer independently", async () => {
   assert.match(source, /type TextLayer =/);
   assert.match(source, /renderPoster\(\{/);
   assert.match(renderer, /for \(const textLayer of textLayers\)/);
-  assert.match(renderer, /mergeMasks\(semanticLayers, textLayer\.frontLayerIds\)/);
+  assert.match(renderer, /frontLayers = semanticLayers\.filter/);
+  assert.match(renderer, /createMaskCanvas\(layer\).*destination-out/);
   assert.match(renderer, /globalCompositeOperation = "destination-out"/);
   assert.match(source, /addTextLayer/);
   assert.match(renderer, /extrusionLength/);
@@ -66,6 +83,8 @@ test("ships an agent-native preview and approved-export contract", async () => {
   assert.match(cli, /Approval is stale/);
   assert.equal(schema.properties.schemaVersion.const, 1);
   assert.equal(schema.properties.textLayers.minItems, 1);
+  assert.deepEqual(schema.$defs.animation.properties.effect.enum, ["fade", "rise", "drift", "zoom"]);
+  assert.deepEqual(schema.properties.timeline.properties.backgroundColor.enum, ["#000000", "#ffffff"]);
 });
 
 test("project archives retain cached masks without embedding the photograph", async () => {
